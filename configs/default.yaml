@@ -1,0 +1,15 @@
+# Paths are relative to this file.
+capture:
+  body: ../examples/fullbody.mp4
+  head_static: ../examples/head_turntable_00004_.mp4
+  head_expressions: ../examples/head_grimace_00004_.mp4
+
+outputs: ../outputs
+
+preprocess:
+  frame_step: 1
+  device: cuda
+  detector: PekingU/rtdetr_v2_r50vd
+  segmenter: facebook/sam2.1-hiera-large
+  pose_estimator: usyd-community/vitpose-base-simple
+  face_landmarker: ../assets/face_landmarker.task

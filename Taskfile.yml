@@ -1,0 +1,46 @@
+version: "3"
+
+tasks:
+  setup:
+    desc: Install dependencies and the git hooks
+    cmds:
+      - uv sync
+      - uv run pre-commit install
+
+  notebook:
+    desc: Open JupyterLab on the notebooks
+    cmds:
+      - uv run jupyter lab notebooks
+
+  test:
+    desc: Run the tests
+    cmds:
+      - uv run pytest {{.CLI_ARGS}}
+
+  lint:
+    desc: Check style and formatting
+    cmds:
+      - uv run ruff check
+      - uv run ruff format --check
+
+  format:
+    desc: Fix style and formatting
+    cmds:
+      - uv run ruff check --fix
+      - uv run ruff format
+
+  check:
+    desc: Lint and test, as before a commit
+    cmds:
+      - task: lint
+      - task: test
+
+  inspect:
+    desc: Describe the capture videos
+    cmds:
+      - uv run avatar-splats inspect
+
+  preprocess:
+    desc: "Preprocess the capture videos (all, or name them: task preprocess -- body)"
+    cmds:
+      - uv run avatar-splats preprocess {{.CLI_ARGS}}

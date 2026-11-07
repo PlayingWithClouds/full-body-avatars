@@ -1,0 +1,19 @@
+# Performer footage and derived data never enter version control.
+examples/*
+!examples/README.md
+outputs/
+assets/*
+!assets/README.md
+
+# Notebook outputs can contain frames; strip them before committing (see pre-commit).
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
