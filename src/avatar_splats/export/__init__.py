@@ -9,6 +9,7 @@ from avatar_splats.export.runtime import AvatarRuntime, bind_relative, forward_k
 from avatar_splats.fitting.pipeline import fitted_path
 from avatar_splats.gaussians import GaussianRecord
 from avatar_splats.training.pipeline import trained_path
+from avatar_splats.training.textures import TextureRecord
 
 __all__ = [
     "AvatarFile",
@@ -27,8 +28,9 @@ def export_capture(config: Config) -> Path:
     """Write the trained avatar as an ``.avatar`` file and return its path."""
     avatar = Avatar.load(fitted_path(config, "avatar"))
     gaussians = GaussianRecord.load(trained_path(config, "gaussians"))
+    textures = TextureRecord.load(trained_path(config, "textures"))
     path = exported_path(config)
-    write_avatar(path, avatar_arrays(avatar, gaussians))
+    write_avatar(path, avatar_arrays(avatar, gaussians, textures, config.training.occlusion_margin))
     return path
 
 

@@ -2,9 +2,13 @@
 
 The head is placed on the body by aligning the two heads. Both meshes are then cut at a seam
 ``neck_seam`` below the chin: the head model keeps the head and upper neck (its lower neck flares
-out into a collar), Anny keeps the rest, and the two overlap by ``neck_overlap`` around the seam.
-Gaussians, not the mesh, are what gets rendered, so the overlap needs no stitching: the head's
-vertices take their skinning weights from Anny's nearest vertices, and the two necks move together.
+out into a collar), Anny keeps the rest. The head model's cut edge is moved onto Anny's neck, its
+neck bent to follow over ``neck_blend``, and a band of triangles closes the gap, so the avatar is
+one surface: drawn as a mesh, it neither cracks nor shows two necks fighting. The head's vertices
+take their skinning weights from Anny's nearest vertices, so the joined neck bends as one.
+
+The mesh carries two textures: the body's, in Anny's UV layout (which the band at the neck also
+uses), and the head's, in ICT-FaceKit's.
 """
 
 from __future__ import annotations
@@ -14,19 +18,31 @@ from dataclasses import dataclass
 
 import numpy as np
 import roma
+import scipy.sparse
+import scipy.sparse.csgraph
 import torch
 
 from avatar_splats.body_models import ict
 from avatar_splats.body_models.anny import AnnyBody
 from avatar_splats.body_models.ict import IctFaceKit
+from avatar_splats.body_models.mesh import (
+    boundary_loops,
+    closest_points,
+    plane_barycentric,
+    uniform_laplacian,
+    zip_loops,
+)
 from avatar_splats.body_models.skinning import linear_blend_skinning, sparsify_weights
 from avatar_splats.config import BodyModelsConfig
 from avatar_splats.records import ArrayRecord
 
 logger = logging.getLogger(__name__)
 
-BODY, HEAD_SKIN, MOUTH, EYES = 0, 1, 2, 3
+BODY, HEAD_SKIN, MOUTH, EYES, HANDS = 0, 1, 2, 3, 4
 """Parts of the avatar's mesh, as stored in ``Avatar.face_parts``."""
+HEAD_PARTS = (HEAD_SKIN, MOUTH, EYES)
+BODY_TEXTURE, HEAD_TEXTURE = 0, 1
+"""The avatar's textures, as stored in ``Avatar.face_textures``."""
 
 ICT_TO_WORLD = torch.tensor([[1.0, 0, 0], [0, 0, -1], [0, 1, 0]])
 """ICT-FaceKit's axes (y up, facing +z) to Anny's (z up, facing -y)."""
@@ -37,6 +53,10 @@ ICT_NOSE_TIP, ICT_RIGHT_EYE, ICT_LEFT_EYE = 30, (36, 39), (42, 45)
 ICT_CHIN = 8
 MATCHED_BELOW_EYES = 0.14
 """How far below the eyes, in metres, the head surfaces are matched to place the head."""
+SEAM_SMOOTHING = 10
+"""Smoothing steps for the vertices along the seam."""
+NECK_SURFACE = 0.05
+"""How far above and below the seam, in metres, Anny's neck is searched for the nearest surface."""
 
 
 @dataclass(frozen=True)
@@ -51,7 +71,11 @@ class Avatar(ArrayRecord):
     faces: np.ndarray
     """``(F, 3)`` triangles."""
     face_parts: np.ndarray
-    """``(F,)`` each triangle's part: ``BODY``, ``HEAD_SKIN``, ``MOUTH`` or ``EYES``."""
+    """``(F,)`` each triangle's part: ``BODY``, ``HANDS``, ``HEAD_SKIN``, ``MOUTH`` or ``EYES``."""
+    uvs: np.ndarray
+    """``(F, 3, 2)`` texture coordinates of the triangles' corners, in [0, 1] with v up."""
+    face_textures: np.ndarray
+    """``(F,)`` each triangle's texture: ``BODY_TEXTURE`` or ``HEAD_TEXTURE``."""
     bone_indices: np.ndarray
     """``(V, K)`` the bones each vertex is bound to."""
     bone_weights: np.ndarray
@@ -107,17 +131,18 @@ class HeadPlacement:
 
 
 def rest_body(
-    body: AnnyBody, phenotype: np.ndarray, offsets: np.ndarray
+    body: AnnyBody, phenotype: np.ndarray, local_changes: np.ndarray
 ) -> dict[str, torch.Tensor]:
     """The fitted body in its rest pose: ``vertices`` ``(V, 3)``, ``keypoints`` ``(17, 3)`` and
     ``bind_poses`` ``(J, 4, 4)``."""
     device = body.faces.device
     out = body(
         torch.from_numpy(phenotype)[None].to(device),
+        torch.from_numpy(local_changes)[None].to(device),
         torch.zeros(1, body.num_bones, 3, device=device),
         torch.zeros(1, 3, device=device),
     )
-    vertices = out["rest_vertices"][0] + torch.from_numpy(offsets).to(device)
+    vertices = out["rest_vertices"][0]
     return {
         "vertices": vertices,
         "keypoints": body.keypoint_regressor({"vertices": vertices[None]})[0],
@@ -139,27 +164,37 @@ def build_avatar(
     placement: HeadPlacement,
     config: BodyModelsConfig,
 ) -> Avatar:
-    """Join the fitted body and head, placed on it, into one rigged mesh."""
+    """Join the fitted body and head, placed on it, into one rigged, textured mesh."""
     device = body.faces.device
     bind_poses = body_rest["bind_poses"]
     body_rest = body_rest["vertices"]
     head = head.to(device)
     scale, rotation = placement.scale, placement.rotation
     head_world = placement.apply(head_rest)
-
     seam = head_world[head.landmarks[ICT_CHIN], 2] - config.neck_seam
-    centroids = body_rest[body.faces].mean(dim=1)
-    removed = body.head_faces & (centroids[:, 2] > seam + config.neck_overlap / 2)
-    body_faces = body.faces[~removed]
-    head_faces = head.faces
-    head_centroids = head_world[head_faces].mean(dim=1)
-    neck = (head_faces.min(dim=1).values >= ict.FACE.stop) & (
-        head_faces.max(dim=1).values < ict.SKIN.stop
-    )
-    head_faces = head_faces[~(neck & (head_centroids[:, 2] < seam - config.neck_overlap / 2))]
+
+    body_kept = ~_above(body.faces, body_rest, seam)
+    body_kept &= ~body.head_faces | (body_rest[body.faces][..., 2].amax(dim=1) <= seam)
+    head_kept = head_world[head.faces][..., 2].amin(dim=1) >= seam
+    body_faces, head_faces = body.faces[body_kept], head.faces[head_kept]
+    neck = _neck_surface(body, body_rest, seam)
+    body_loop = _loop_at(body_faces, body_rest, seam)
+    head_loop = _loop_at(head_faces, head_world, seam)
+    head_world = _bend_neck(head_world, head_loop, body_rest, body.faces[neck], config.neck_blend)
+
     kept = torch.unique(body_faces)
     remap = torch.full((len(body_rest),), -1, dtype=torch.long, device=device)
     remap[kept] = torch.arange(len(kept), device=device)
+    bridge = torch.from_numpy(
+        zip_loops(body_rest[body_loop].cpu().numpy(), head_world[head_loop].cpu().numpy())
+    ).to(device)
+    ends = torch.cat((remap[body_loop], len(kept) + head_loop))
+    bridge_vertices = torch.cat((body_rest[body_loop], head_world[head_loop]))[bridge]
+    bridge_uvs = _surface_uvs(bridge_vertices, body, body_rest, neck)
+
+    vertices = torch.cat((body_rest[kept], head_world))
+    faces = torch.cat((remap[body_faces], ends[bridge], head_faces + len(kept)))
+    vertices = _smooth_seam(vertices, faces, ends)
 
     k = config.max_bone_influences
     body_bones, body_weights = sparsify_weights(body.skin_weights[kept], k)
@@ -168,21 +203,26 @@ def build_avatar(
     parts = torch.full((len(head_faces),), HEAD_SKIN, device=device)
     parts[head_faces.min(dim=1).values >= ict.MOUTH_INTERIOR.start] = MOUTH
     parts[head_faces.min(dim=1).values >= ict.EYEBALLS.start] = EYES
+    on_body = len(body_faces) + len(bridge)
+    body_parts = torch.full((on_body,), BODY, device=device)
+    body_parts[: len(body_faces)][body.hand_faces[body_kept]] = HANDS
 
     expression_basis = scale * head.expression_basis @ rotation.T
     logger.info(
-        "avatar: %d body and %d head vertices, head scaled by %.3f",
+        "avatar: %d body and %d head vertices, head scaled by %.3f, %d triangles at the neck",
         len(kept),
         len(head_world),
         scale,
+        len(bridge),
     )
     return Avatar(
-        rest_vertices=torch.cat((body_rest[kept], head_world)).cpu().numpy(),
-        faces=torch.cat((remap[body_faces], head_faces + len(kept))).cpu().numpy(),
-        face_parts=torch.cat((torch.full((len(body_faces),), BODY, device=device), parts))
-        .to(torch.int8)
-        .cpu()
-        .numpy(),
+        rest_vertices=vertices.cpu().numpy(),
+        faces=faces.cpu().numpy(),
+        face_parts=torch.cat((body_parts, parts)).to(torch.int8).cpu().numpy(),
+        uvs=torch.cat((body.uvs[body_kept], bridge_uvs, head.uvs[head_kept])).cpu().numpy(),
+        face_textures=np.repeat(
+            np.array([BODY_TEXTURE, HEAD_TEXTURE], np.int8), [on_body, len(head_faces)]
+        ),
         bone_indices=torch.cat((body_bones, head_bones)).cpu().numpy(),
         bone_weights=torch.cat((body_weights, head_weights)).cpu().numpy(),
         bone_labels=np.array(body.bone_labels),
@@ -192,6 +232,87 @@ def build_avatar(
         expression_names=np.array(head.expression_names),
         expression_basis=expression_basis.cpu().numpy(),
     )
+
+
+def _above(faces: torch.Tensor, vertices: torch.Tensor, seam: torch.Tensor) -> torch.Tensor:
+    """``(F,)`` bool: the triangles reaching above the seam that hang together with the top of
+    the head. Anny's head part ends near the chin, so the cut cannot follow the parts alone; its
+    eyes, which hang together with nothing, go with the head part."""
+    above = vertices[faces][..., 2].amax(dim=1) > seam
+    edges = faces[above][:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2).cpu().numpy()
+    graph = scipy.sparse.coo_matrix(
+        (np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(len(vertices),) * 2
+    )
+    _, labels = scipy.sparse.csgraph.connected_components(graph, directed=False)
+    labels = torch.from_numpy(labels).to(faces.device)
+    return above & (labels[faces[:, 0]] == labels[vertices[:, 2].argmax()])
+
+
+def _neck_surface(body: AnnyBody, body_rest: torch.Tensor, seam: torch.Tensor) -> torch.Tensor:
+    """``(F,)`` indices of Anny's triangles around the seam, all of them, cut or not."""
+    centroids = body_rest[body.faces].mean(dim=1)
+    return torch.nonzero((centroids[:, 2] - seam).abs() < NECK_SURFACE).squeeze(-1)
+
+
+def _loop_at(faces: torch.Tensor, vertices: torch.Tensor, seam: torch.Tensor) -> torch.Tensor:
+    """``(N,)`` the vertices of the mesh's boundary loop nearest the seam: where it was cut."""
+    loops = boundary_loops(faces.cpu().numpy())
+    distance = [(vertices[loop, 2] - seam).abs().mean().item() for loop in loops]
+    return torch.from_numpy(loops[int(np.argmin(distance))]).to(vertices.device)
+
+
+def _bend_neck(
+    head: torch.Tensor,
+    loop: torch.Tensor,
+    body_rest: torch.Tensor,
+    neck: torch.Tensor,
+    blend: float,
+) -> torch.Tensor:
+    """The head's vertices with its cut neck moved onto the body's neck surface.
+
+    The cut edge moves all the way; the neck above it follows less the farther up it is, and
+    nothing moves more than ``blend`` metres from the edge.
+
+    Args:
+        neck: ``(F, 3)`` the triangles of the body's neck.
+    """
+    faces, weights = closest_points(head[loop], body_rest, neck)
+    on_body = (weights.unsqueeze(-1) * body_rest[neck[faces]]).sum(dim=1)
+    shift = on_body - head[loop]
+
+    skin = head[ict.SKIN]
+    distances, nearest = torch.cdist(skin, head[loop]).topk(4, largest=False)
+    blend_weights = 1 / distances.clamp_min(1e-5)
+    blend_weights = blend_weights / blend_weights.sum(dim=-1, keepdim=True)
+    falloff = (1 - distances[:, 0] / blend).clamp(0, 1)
+    falloff = falloff * falloff * (3 - 2 * falloff)
+    moved = (blend_weights.unsqueeze(-1) * shift[nearest]).sum(dim=1) * falloff.unsqueeze(-1)
+    head = head.clone()
+    head[ict.SKIN] += moved
+    logger.info("neck bent onto the body by up to %.1f mm", 1000 * shift.norm(dim=-1).max())
+    return head
+
+
+def _smooth_seam(vertices: torch.Tensor, faces: torch.Tensor, seam: torch.Tensor) -> torch.Tensor:
+    """The vertices with the seam's zigzag smoothed out: triangles are cut whole, so the cut
+    edges step up and down by a triangle's height."""
+    laplacian = uniform_laplacian(faces, len(vertices))
+    vertices = vertices.clone()
+    for _ in range(SEAM_SMOOTHING):
+        vertices[seam] -= 0.5 * (laplacian @ vertices)[seam]
+    return vertices
+
+
+def _surface_uvs(
+    triangles: torch.Tensor, body: AnnyBody, body_rest: torch.Tensor, neck: torch.Tensor
+) -> torch.Tensor:
+    """``(T, 3, 2)`` body texture coordinates for ``(T, 3, 3)`` triangles lying on the body's
+    neck: each triangle takes its corners' coordinates from the body triangle nearest its centre,
+    so none spans a seam of the body's texture layout."""
+    faces, _ = closest_points(triangles.mean(dim=1), body_rest, body.faces[neck])
+    corners = body_rest[body.faces[neck[faces]]]  # (T, 3, 3)
+    weights = plane_barycentric(triangles, *corners.unsqueeze(1).unbind(dim=2))
+    return weights @ body.uvs[neck[faces]]
 
 
 def match_heads(

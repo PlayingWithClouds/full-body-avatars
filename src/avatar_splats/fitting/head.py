@@ -131,7 +131,8 @@ def fit_heads(
     centre = neutral.mean(dim=0)
     skin_faces = model.faces[model.faces.max(dim=1).values < ict.SKIN.stop]
     samples = SurfaceSamples.draw(model.neutral, skin_faces, config.surface_samples)
-    radius = 0.8 * samples.spacing
+    radius = samples.radius
+    inset = config.silhouette_inset * radius
     landmark_vertices = model.landmarks.to(device)
 
     fits = {
@@ -163,7 +164,7 @@ def fit_heads(
             )
             if phase >= 1:
                 rendered = render_silhouette(
-                    samples.points(vertices, skin_faces), radius, video.camera
+                    samples.points(vertices, skin_faces, inset), radius, video.camera
                 )
                 terms[f"{name} silhouette"] = config.silhouette_weight * silhouette_loss(
                     rendered, video.masks, chin_region(video, vertices)
@@ -197,7 +198,8 @@ def fit_heads(
     with torch.no_grad():
         for name, video in fits.items():
             vertices = pose(video)
-            rendered = render_silhouette(samples.points(vertices, skin_faces), radius, video.camera)
+            points = samples.points(vertices, skin_faces, inset)
+            rendered = render_silhouette(points, radius, video.camera)
             region = chin_region(video, vertices).bool()
             iou = silhouette_iou(rendered * region, video.masks * region)
             projected = video.camera.project(vertices[:, landmark_vertices])

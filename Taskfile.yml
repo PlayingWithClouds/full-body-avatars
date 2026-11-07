@@ -67,3 +67,11 @@ tasks:
       - task: fit
       - task: train
       - task: export
+
+  viewer:
+    desc: View the exported avatar in the browser (http://localhost:5173)
+    dir: viewer
+    cmds:
+      - bun install
+      - ln -sf {{.ROOT_DIR}}/outputs/export/performer.avatar static/performer.avatar
+      - bun run dev

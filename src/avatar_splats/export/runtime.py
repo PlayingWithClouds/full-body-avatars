@@ -7,9 +7,11 @@ Per frame:
 2. Skinning matrices: each bone's world transform times the inverse of its bind pose.
 3. Expressions: the head's rest vertices plus the expression blendshapes, weighted.
 4. Linear blend skinning of all vertices.
-5. Each Gaussian is placed on its triangle (``BoundGaussians.place``): anchor point, offset,
+5. The mesh is drawn with its two textures, filling the depth buffer.
+6. Each Gaussian is placed on its triangle (``BoundGaussians.place``): anchor point, offset,
    rotation and scale in the triangle's frame.
-6. The Gaussians are splatted, colours from their spherical harmonics plus 0.5.
+7. The Gaussians are splatted over the mesh, colours from their spherical harmonics plus 0.5,
+   each depth-tested against the mesh with a margin of ``occlusion_margin`` triangle sizes.
 """
 
 from __future__ import annotations
@@ -18,8 +20,10 @@ import numpy as np
 import torch
 
 from avatar_splats.body_models.hybrid import Avatar, Rig
+from avatar_splats.cameras import Camera
 from avatar_splats.export.avatar_file import AvatarFile
 from avatar_splats.gaussians import BoundGaussians, GaussianRecord
+from avatar_splats.rendering import composite, render_mesh
 
 
 def forward_kinematics(
@@ -74,6 +78,8 @@ class AvatarRuntime(torch.nn.Module):
                 rest_vertices=arrays["rest_vertices"],
                 faces=arrays["faces"].astype(np.int64),
                 face_parts=np.zeros(len(arrays["faces"]), np.int8),
+                uvs=arrays["uvs"],
+                face_textures=arrays["face_textures"].astype(np.int8),
                 bone_indices=arrays["bone_indices"].astype(np.int64),
                 bone_weights=arrays["bone_weights"],
                 bone_labels=np.array(self.bone_names),
@@ -84,6 +90,12 @@ class AvatarRuntime(torch.nn.Module):
                 expression_basis=arrays["expression_basis"],
             )
         )
+        self.occlusion_margin: float = metadata["occlusion_margin"]
+        self.register_buffer("uvs", torch.from_numpy(arrays["uvs"]))
+        self.register_buffer("face_textures", torch.from_numpy(arrays["face_textures"]).long())
+        for name in metadata["textures"]:
+            self.register_buffer(name, torch.from_numpy(arrays[name]).float() / 255)
+        self.texture_names: list[str] = metadata["textures"]
         opacities = arrays["gaussian_opacities"].clip(1e-7, 1 - 1e-7)
         self.gaussians = BoundGaussians(
             GaussianRecord(
@@ -112,3 +124,25 @@ class AvatarRuntime(torch.nn.Module):
         """Means, wxyz rotations, scales, opacities and SH of the Gaussians on ``(V, 3)``."""
         means, rotations, scales = self.gaussians.place(vertices, self.rig.faces)
         return means, rotations, scales, self.gaussians.opacities(), self.gaussians.sh()
+
+    def render(
+        self, vertices: torch.Tensor, camera: Camera, background: torch.Tensor
+    ) -> torch.Tensor:
+        """``(H, W, 3)`` image of the avatar posed as ``(V, 3)`` vertices, over a ``(3,)``
+        background colour."""
+        faces = self.rig.faces
+        mesh = render_mesh(
+            vertices,
+            faces,
+            self.uvs,
+            self.face_textures,
+            [getattr(self, name) for name in self.texture_names],
+            camera,
+            torch.zeros_like(background),
+        )
+        means, rotations, scales, opacities, sh = self.place(vertices)
+        margins = self.occlusion_margin * self.gaussians.triangle_sizes(vertices, faces)
+        image, alpha = composite(
+            means, rotations, scales, opacities, sh, margins, mesh, camera, self.sh_degree
+        )
+        return image + (1 - alpha).unsqueeze(-1) * background

@@ -24,6 +24,9 @@ class Preprocessed(ArrayRecord):
     """``(N, 4)`` float: the silhouette's bounding box as x0, y0, x1, y1 in pixels."""
     keypoints: np.ndarray | None = None
     """``(N, 17, 3)`` float: COCO body keypoints as x, y in pixels and confidence."""
+    hands: np.ndarray | None = None
+    """``(N, 2, 21, 3)`` float: MediaPipe landmarks of the left and right hand as x, y in pixels
+    and confidence."""
     face_landmarks: np.ndarray | None = None
     """``(N, 478, 3)`` float: MediaPipe face landmarks as x, y in pixels and depth, in pixels
     of image width, relative to the head's center."""

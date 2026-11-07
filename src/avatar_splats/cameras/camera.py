@@ -36,6 +36,24 @@ class Camera:
     def fixed(cls, width: int, height: int, fov_y_degrees: float) -> Camera:
         return cls(intrinsics(width, height, fov_y_degrees), world_to_camera(), width, height)
 
+    def looking_at(self, position: torch.Tensor, target: torch.Tensor) -> Camera:
+        """This camera's lens and image size, at ``(3,)`` world ``position`` looking at
+        ``target``, upright in a z-up world."""
+        forward = torch.nn.functional.normalize(target - position, dim=0)
+        right = torch.nn.functional.normalize(
+            torch.linalg.cross(forward, forward.new_tensor([0.0, 0, 1])), dim=0
+        )
+        down = torch.linalg.cross(forward, right)
+        view = torch.eye(4, device=position.device)
+        view[:3, :3] = torch.stack((right, down, forward))
+        view[:3, 3] = -view[:3, :3] @ position
+        return Camera(self.K, view, self.width, self.height)
+
+    @property
+    def position(self) -> torch.Tensor:
+        """``(3,)`` the camera's centre in the world."""
+        return -self.view[:3, :3].T @ self.view[:3, 3]
+
     def scaled(self, factor: float) -> Camera:
         """The same camera taking images ``factor`` times as large on each side."""
         K = self.K.clone()
@@ -47,9 +65,14 @@ class Camera:
 
     def project(self, points: torch.Tensor) -> torch.Tensor:
         """Project ``(..., 3)`` world points to ``(..., 2)`` pixel coordinates."""
+        return self.screen(points)[..., :2]
+
+    def screen(self, points: torch.Tensor) -> torch.Tensor:
+        """``(..., 3)`` world points as pixel coordinates and depth along the view direction."""
         camera = points @ self.view[:3, :3].T + self.view[:3, 3]
         pixels = camera @ self.K.T
-        return pixels[..., :2] / pixels[..., 2:].clamp_min(1e-6)
+        depth = pixels[..., 2:]
+        return torch.cat((pixels[..., :2] / depth.clamp_min(1e-6), depth), dim=-1)
 
     def depth_for_height(self, world_height: float, pixel_height: float) -> float:
         """Distance at which something ``world_height`` tall spans ``pixel_height`` pixels."""

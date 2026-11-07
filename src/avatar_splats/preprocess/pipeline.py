@@ -11,6 +11,7 @@ from avatar_splats.config import VIDEOS, Config, PreprocessConfig
 from avatar_splats.data import probe, read_frames
 from avatar_splats.preprocess.detection import detect_person
 from avatar_splats.preprocess.face import detect_face_landmarks, download_face_landmarker
+from avatar_splats.preprocess.hands import detect_hands, download_hand_landmarker
 from avatar_splats.preprocess.keypoints import estimate_keypoints
 from avatar_splats.preprocess.results import Preprocessed
 from avatar_splats.preprocess.segmentation import mask_boxes, track_person
@@ -25,9 +26,12 @@ def preprocess_video(
     masks = track_person(frames, box, config.segmenter, config.device)
     boxes = mask_boxes(masks)
 
-    body_keypoints = face_landmarks = None
+    body_keypoints = hands = face_landmarks = None
     if keypoints:
         body_keypoints = estimate_keypoints(frames, boxes, config.pose_estimator, config.device)
+        hands = detect_hands(
+            frames, body_keypoints, download_hand_landmarker(config.hand_landmarker)
+        )
     if face:
         model = download_face_landmarker(config.face_landmarker)
         fps = probe(path).fps / config.frame_step
@@ -38,6 +42,7 @@ def preprocess_video(
         masks=masks,
         boxes=boxes,
         keypoints=body_keypoints,
+        hands=hands,
         face_landmarks=face_landmarks,
     )
 
@@ -45,7 +50,7 @@ def preprocess_video(
 def preprocess_capture(config: Config, videos: Iterable[str] = VIDEOS) -> dict[str, Path]:
     """Preprocess the named videos of the capture and return where each result was written.
 
-    The body video gets body keypoints, the head videos face landmarks.
+    The body video gets body and hand keypoints, the head videos face landmarks.
     """
     written = {}
     for name in videos:

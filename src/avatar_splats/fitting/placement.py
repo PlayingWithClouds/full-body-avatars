@@ -85,10 +85,12 @@ def place_head(
         bones, weights = sparsify_weights(transfer_weights(body, body_rest, start), BONE_INFLUENCES)
         torso = body.faces[~body.head_faces]
         torso_samples = SurfaceSamples.draw(body_rest, torso, config.surface_samples)
-        torso_points = torso_samples.points(body_vertices, torso)
     skin = head.faces[head.faces.max(dim=1).values < ict.SKIN.stop]
     head_samples = SurfaceSamples.draw(start, skin, config.surface_samples // 2)
-    radius = 0.8 * min(torso_samples.spacing, head_samples.spacing)
+    radius = min(torso_samples.radius, head_samples.radius)
+    inset = config.silhouette_inset * radius
+    with torch.no_grad():
+        torso_points = torso_samples.points(body_vertices, torso, inset)
     landmarks = head.landmarks
     centre = start[ict.SKIN].mean(dim=0)
 
@@ -111,7 +113,7 @@ def place_head(
             ),
             dim=1,
         )
-        points = torch.cat((torso_points, head_samples.points(posed, skin)), dim=1)
+        points = torch.cat((torso_points, head_samples.points(posed, skin, inset)), dim=1)
         silhouettes = render_silhouette(points, radius, camera)
         return {
             "keypoints": config.keypoint_weight

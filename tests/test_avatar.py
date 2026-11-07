@@ -8,6 +8,7 @@ from torch.testing import assert_close
 from avatar_splats.body_models.hybrid import Avatar, Rig
 from avatar_splats.export import AvatarRuntime, avatar_arrays, read_avatar, write_avatar
 from avatar_splats.gaussians import BoundGaussians
+from avatar_splats.training import TextureRecord
 
 
 @pytest.fixture
@@ -21,6 +22,8 @@ def avatar() -> Avatar:
         ),
         faces=np.array([[0, 1, 2], [3, 4, 5]]),
         face_parts=np.array([0, 1], np.int8),
+        uvs=np.array([[[0, 0], [1, 0], [0, 1]]] * 2, np.float32),
+        face_textures=np.array([0, 1], np.int8),
         bone_indices=np.array([[0, 1]] * 3 + [[1, 0]] * 3),
         bone_weights=np.array([[1, 0]] * 3 + [[1, 0]] * 3, np.float32),
         bone_labels=np.array(["root", "head"]),
@@ -29,6 +32,16 @@ def avatar() -> Avatar:
         head_start=3,
         expression_names=np.array(["jawOpen"]),
         expression_basis=np.array([[[0, 0, 0.5], [0, 0, 0], [0, 0, 0]]], np.float32),
+    )
+
+
+@pytest.fixture
+def textures() -> TextureRecord:
+    return TextureRecord(
+        body=np.full((4, 4, 3), 0.25, np.float32),
+        head=np.full((4, 20, 3), 0.75, np.float32),
+        body_coverage=np.ones((4, 4), np.float32),
+        head_coverage=np.ones((4, 20), np.float32),
     )
 
 
@@ -69,19 +82,20 @@ def test_gaussians_follow_their_triangles(avatar, gaussians):
     assert_close(after, rotation @ before, atol=1e-5, rtol=0)
 
 
-def test_avatar_file_round_trip(tmp_path, avatar, gaussians):
-    written = avatar_arrays(avatar, gaussians.record())
+def test_avatar_file_round_trip(tmp_path, avatar, gaussians, textures):
+    written = avatar_arrays(avatar, gaussians.record(), textures, 2.0)
     write_avatar(tmp_path / "test.avatar", written)
     read = read_avatar(tmp_path / "test.avatar")
     assert read.metadata["bones"] == ["root", "head"]
     assert read.metadata["sh_degree"] == 1
+    assert read.arrays["head_texture"].dtype == np.uint8
     for name, array in written.arrays.items():
         assert read.arrays[name].dtype == array.dtype
         assert_array_equal(read.arrays[name], array)
 
 
-def test_runtime_reproduces_the_trained_avatar(tmp_path, avatar, gaussians):
-    write_avatar(tmp_path / "test.avatar", avatar_arrays(avatar, gaussians.record()))
+def test_runtime_reproduces_the_trained_avatar(tmp_path, avatar, gaussians, textures):
+    write_avatar(tmp_path / "test.avatar", avatar_arrays(avatar, gaussians.record(), textures, 2.0))
     runtime = AvatarRuntime(read_avatar(tmp_path / "test.avatar"))
 
     # Bones at rest pose the mesh in its rest pose.
@@ -99,11 +113,15 @@ def test_runtime_reproduces_the_trained_avatar(tmp_path, avatar, gaussians):
     assert_close(means, expected)
 
 
-def test_flatness_tells_lying_from_standing_gaussians(gaussians):
+def test_gaussians_are_laid_flat_on_their_triangles(gaussians):
     with torch.no_grad():
-        gaussians.log_scales[:] = torch.tensor([0.0, 0.0, -3.0])  # thin along the third axis
-        gaussians.rotations[:] = torch.tensor([1.0, 0, 0, 0])  # lying flat on the triangle
-        gaussians.rotations[:10] = torch.tensor([0.7071, 0.7071, 0, 0])  # tipped up 90 degrees
-    flatness = gaussians.flatness()
-    assert_close(flatness[10:], torch.ones(40))
-    assert_close(flatness[:10], torch.zeros(10), atol=1e-4, rtol=0)
+        gaussians.rotations[:] = torch.tensor([0.5, 0.5, 0.5, 0.5])  # tipped and turned
+        gaussians.offsets[:] = torch.tensor([0.2, 0.0, 0.5])
+        gaussians.log_scales[0, 0] = -9.0  # narrower than the disc is thick
+    gaussians.lay_flat(torch.full((50,), 0.1), torch.full((50,), -5.0))
+    assert_close(
+        gaussians.rotations, torch.tensor([0.7071, 0, 0, 0.7071]).expand(50, 4), atol=1e-4, rtol=0
+    )
+    assert_close(gaussians.log_scales[:, 2], torch.full((50,), -5.0))
+    assert gaussians.log_scales[0, 0] == -5.0
+    assert_close(gaussians.offsets, torch.tensor([0.2, 0.0, 0.1]).expand(50, 3))

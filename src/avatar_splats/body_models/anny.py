@@ -26,7 +26,27 @@ HEAD_PARTS = (
     "mouth_cavity",
     "tongue",
 )
-"""Anny's mesh parts above the shoulders; the neck belongs to "head"."""
+"""Anny's mesh parts of the head; they end near the chin."""
+HAND_PARTS = ("hand.L", "hand.R")
+FOOT_PARTS = ("foot.L", "foot.R")
+BODY_CHANGES = (
+    "l-upperarm", "r-upperarm", "l-lowerarm", "r-lowerarm",
+    "breast", "nipple", "torso", "stomach", "pelvis", "buttocks", "hip-", "neck-",
+    "l-upperleg", "r-upperleg", "l-lowerleg", "r-lowerleg", "l-leg", "r-leg",
+    "upperlegs", "lowerlegs", "measure-",
+)  # fmt: skip
+"""Prefixes of the MakeHuman local changes fitted to the body: girth, volume and proportions of
+the limbs and torso. The head's are left out (ICT-FaceKit replaces it), as are the hands' and
+feet's, too small in the frames to fit."""
+EXCLUDED_CHANGES = (
+    "-trans-",
+    "torso-scale-vert-incr", "measure-napetowaist-dist-incr", "measure-waisttohip-dist-incr",
+    "neck-scale-vert-incr", "measure-neck-height-incr",
+    "upperlegs-height-incr", "lowerlegs-height-incr", "nipple-point-incr",
+)  # fmt: skip
+"""Parts of labels of local changes not fitted: shifts of the torso, hips or neck as a whole
+(the fit's translation and tilt place the body), changes that move the head (it is replaced at
+the neck), duplicates of ``measure-*`` changes, and one that changes nothing."""
 
 
 class AnnyBody(torch.nn.Module):
@@ -38,7 +58,14 @@ class AnnyBody(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.model = anny.Anny(phenotypes="all").to(dtype=torch.float32)
+        changes = [
+            label
+            for label in anny.Anny(local_changes="all").local_change_labels
+            if label.startswith(BODY_CHANGES)
+            and not any(part in label for part in EXCLUDED_CHANGES)
+        ]
+        self.model = anny.Anny(phenotypes="all", local_changes=changes).to(dtype=torch.float32)
+        self.local_change_labels: tuple[str, ...] = tuple(self.model.local_change_labels)
         self.keypoint_regressor = anny.KeypointsRegressor.coco(
             self.model, labels=list(COCO_KEYPOINTS)
         )
@@ -47,6 +74,10 @@ class AnnyBody(torch.nn.Module):
         self.bone_parents: tuple[int, ...] = tuple(self.model.bone_parents)
         self.register_buffer("faces", self.model.faces.clone())
         self.register_buffer(
+            "uvs",
+            self.model.texture_coordinates[self.model.face_texture_coordinate_indices].float(),
+        )
+        self.register_buffer(
             "skin_weights",
             dense_bone_weights(
                 self.model.vertex_bone_weights,
@@ -54,7 +85,9 @@ class AnnyBody(torch.nn.Module):
                 self.model.bone_count,
             ).float(),
         )
-        self.register_buffer("head_faces", get_face_segmentation_mask(self.model, list(HEAD_PARTS)))
+        for name, parts in (("head", HEAD_PARTS), ("hand", HAND_PARTS), ("foot", FOOT_PARTS)):
+            mask = get_face_segmentation_mask(self.model, list(parts))
+            self.register_buffer(f"{name}_faces", mask)
 
     @property
     def num_bones(self) -> int:
@@ -68,12 +101,18 @@ class AnnyBody(torch.nn.Module):
         return torch.full((batch, len(self.phenotype_labels)), 0.5, device=self.faces.device)
 
     def forward(
-        self, phenotype: torch.Tensor, rotations: torch.Tensor, translation: torch.Tensor
+        self,
+        phenotype: torch.Tensor,
+        local_changes: torch.Tensor,
+        rotations: torch.Tensor,
+        translation: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """Pose the body.
 
         Args:
             phenotype: ``(B, P)`` values in [0, 1], one per ``phenotype_labels``.
+            local_changes: ``(B, L)`` values in [-1, 1], one per ``local_change_labels``; 0 is
+                no change.
             rotations: ``(B, J, 3)`` rotation vectors, one per bone.
             translation: ``(B, 3)`` root translation in metres.
 
@@ -86,7 +125,9 @@ class AnnyBody(torch.nn.Module):
         pose = torch.eye(4, device=rotations.device).repeat(*rotations.shape[:2], 1, 1)
         pose[..., :3, :3] = roma.rotvec_to_rotmat(rotations)
         pose[:, 0, :3, 3] = translation
-        output = self.model(pose_parameters=pose, phenotype_kwargs=phenotype)
+        output = self.model(
+            pose_parameters=pose, phenotype_kwargs=phenotype, local_changes_kwargs=local_changes
+        )
         output["keypoints"] = self.keypoint_regressor(output)
         output["skinning"] = output["bone_poses"] @ torch.linalg.inv(output["rest_bone_poses"])
         return output

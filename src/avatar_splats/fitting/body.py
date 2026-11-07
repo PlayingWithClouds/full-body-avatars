@@ -1,5 +1,11 @@
-"""Fitting Anny to the body turntable: one shape, one pose with small per-frame head movements,
-a turntable angle per frame, and per-vertex offsets for what the shape space cannot express."""
+"""Fitting Anny to the body turntable: one shape, one pose with small per-frame movements of the
+head, spine and limbs, and a turntable angle per frame.
+
+The shape is Anny's phenotype plus MakeHuman's local changes of the limbs and torso (breast
+volume, upper arm fat, hip width, ...; see ``anny.BODY_CHANGES``), all smooth by construction.
+Per-vertex offsets fitted to silhouettes did worse: wherever the pose was a little off they warped
+the surface to match the outline instead, a step at the elbow, boxy breasts.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +18,6 @@ import torch
 import torch.nn.functional as F
 
 from avatar_splats.body_models.anny import AnnyBody
-from avatar_splats.body_models.mesh import uniform_laplacian
 from avatar_splats.body_models.skinning import linear_blend_skinning, sparsify_weights
 from avatar_splats.cameras import Camera, body_yaw
 from avatar_splats.config import FittingConfig
@@ -20,6 +25,7 @@ from avatar_splats.fitting.losses import keypoint_loss, second_difference, silho
 from avatar_splats.fitting.silhouette import SurfaceSamples, render_silhouette, silhouette_iou
 from avatar_splats.preprocess import Preprocessed
 from avatar_splats.records import ArrayRecord
+from avatar_splats.rendering import rasterize
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +38,23 @@ POSED_BONES = tuple(
         "lowerarm01": "LR", "lowerarm02": "LR", "wrist": "LR",
         "upperleg01": "LR", "upperleg02": "LR", "lowerleg01": "LR", "lowerleg02": "LR",
         "foot": "LR",
+        **{f"finger{finger}-{joint}": "LR" for finger in range(1, 6) for joint in range(1, 4)},
     }.items()
     for side in (sides or [""])
 )  # fmt: skip
-"""Bones whose rotation is fitted; fingers, toes and the rest keep Anny's rest pose."""
+"""Bones whose rotation is fitted; toes, metacarpals and the rest keep Anny's rest pose."""
 
-MOVING_BONES = ("neck01", "neck02", "neck03", "head")
-"""Bones that may move from frame to frame: the performer holds still but for the head."""
+MOVING_BONES = (
+    "spine05", "spine04", "spine03", "spine02", "spine01", "neck01", "neck02", "neck03", "head",
+    "clavicle.L", "clavicle.R", "upperarm01.L", "upperarm01.R", "lowerarm01.L", "lowerarm01.R",
+    "upperleg01.L", "upperleg01.R",
+)  # fmt: skip
+"""Bones that may move from frame to frame, smoothly. The videos are generated, not a rigid
+turntable: the performer sways and her arms drift by a few centimetres as she turns, and with one
+pose for all frames the Gaussians blur over the difference."""
 
 MIN_KEYPOINT_CONFIDENCE = 0.3
+MIN_HAND_CONFIDENCE = 0.5
 BONE_INFLUENCES = 8
 """Bones per vertex when skinning Anny during fitting; more change nothing visible."""
 
@@ -53,12 +67,12 @@ class BodyFit(ArrayRecord):
     """``(N,)`` the video frames."""
     phenotype: np.ndarray
     """``(P,)`` Anny phenotype values in [0, 1]."""
+    local_changes: np.ndarray
+    """``(L,)`` Anny local changes in [-1, 1], one per ``AnnyBody.local_change_labels``."""
     rotations: np.ndarray
     """``(N, J, 3)`` rotation vectors per bone and frame, root first."""
     translation: np.ndarray
     """``(N, 3)`` root translation per frame, in metres."""
-    offsets: np.ndarray
-    """``(V, 3)`` rest-pose offsets added to Anny's vertices, in metres."""
     fov_y_degrees: float
     image_size: np.ndarray
     """``(2,)`` width and height of the video."""
@@ -72,6 +86,43 @@ class BodyFit(ArrayRecord):
         return Camera.fixed(int(width), int(height), self.fov_y_degrees)
 
 
+class HandJoints:
+    """Anny's points matching MediaPipe's 21 hand landmarks, on both hands.
+
+    The wrist and the finger joints are bone heads; Anny's finger bones run from the thumb
+    (``finger1``) to the little finger (``finger5``), three per finger from the knuckle nearest
+    the wrist, as the landmarks do. Fingertips have no bone, so each is the vertex of the last
+    finger bone farthest along it.
+    """
+
+    def __init__(self, body: AnnyBody, rest: torch.Tensor, rest_bone_poses: torch.Tensor):
+        """Args: ``(V, 3)`` rest vertices and ``(J, 4, 4)`` rest bone frames of the body."""
+        heads = rest_bone_poses[:, :3, 3]
+        self.bones, self.tips = [], []
+        for side in "LR":
+            bones = [body.bone(f"wrist.{side}")]
+            for finger in range(1, 6):
+                joints = [body.bone(f"finger{finger}-{joint}.{side}") for joint in (1, 2, 3)]
+                bones += joints
+                direction = heads[joints[2]] - heads[joints[1]]
+                along = (rest - heads[joints[2]]) @ direction
+                along[body.skin_weights[:, joints[2]] < 0.5] = -torch.inf
+                self.tips.append(int(along.argmax()))
+            self.bones.append(bones)
+
+    def __call__(self, vertices: torch.Tensor, joints: torch.Tensor) -> torch.Tensor:
+        """``(N, 2, 21, 3)`` hand points of ``(N, V, 3)`` posed vertices and ``(N, J, 3)`` posed
+        bone heads, the left hand first."""
+        hands = []
+        for side, bones in enumerate(self.bones):
+            points = [joints[:, bones[0]]]
+            for finger in range(5):
+                points += [joints[:, bone] for bone in bones[1 + 3 * finger : 4 + 3 * finger]]
+                points.append(vertices[:, self.tips[5 * side + finger]])
+            hands.append(torch.stack(points, dim=1))
+        return torch.stack(hands, dim=1)
+
+
 class _BodyParameters(torch.nn.Module):
     def __init__(self, body: AnnyBody, yaw: np.ndarray, translation: torch.Tensor):
         super().__init__()
@@ -83,13 +134,16 @@ class _BodyParameters(torch.nn.Module):
         self.phenotype_logit = torch.nn.Parameter(torch.zeros(len(body.phenotype_labels)))
         self.pose = torch.nn.Parameter(torch.zeros(bones, 3))
         self.movement = torch.nn.Parameter(torch.zeros(frames, len(MOVING_BONES), 3))
-        self.offsets = torch.nn.Parameter(torch.zeros(body.faces.max().item() + 1, 3))
+        self.local_change_raw = torch.nn.Parameter(torch.zeros(len(body.local_change_labels)))
         self.register_buffer("posed", torch.zeros(bones, 1))
         self.posed[[body.bone(name) for name in POSED_BONES]] = 1
         self.moving = [body.bone(name) for name in MOVING_BONES]
 
     def phenotype(self) -> torch.Tensor:
         return torch.sigmoid(self.phenotype_logit)
+
+    def local_changes(self) -> torch.Tensor:
+        return torch.tanh(self.local_change_raw)
 
     def rotations(self) -> torch.Tensor:
         frames = len(self.yaw)
@@ -106,25 +160,25 @@ class _BodyParameters(torch.nn.Module):
 def pose_body(
     body: AnnyBody,
     phenotype: torch.Tensor,
+    local_changes: torch.Tensor,
     rotations: torch.Tensor,
     translation: torch.Tensor,
-    offsets: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Anny with per-vertex offsets, posed.
+    """Anny posed, skinned with ``BONE_INFLUENCES`` bones per vertex.
 
     Args:
         phenotype: ``(1, P)`` shared by all frames.
+        local_changes: ``(1, L)`` shared by all frames.
         rotations: ``(N, J, 3)`` rotation vectors.
         translation: ``(N, 3)`` root translations.
-        offsets: ``(V, 3)`` rest-pose vertex offsets.
 
     Returns:
         ``(N, J, 4, 4)`` skinning matrices and ``(N, V, 3)`` vertices.
     """
-    out = body(phenotype, rotations, translation)
+    out = body(phenotype, local_changes, rotations, translation)
     indices, weights = sparsify_weights(body.skin_weights, BONE_INFLUENCES)
-    rest = out["rest_vertices"] + offsets
-    return out["skinning"], linear_blend_skinning(rest, indices, weights, out["skinning"])
+    vertices = linear_blend_skinning(out["rest_vertices"], indices, weights, out["skinning"])
+    return out["skinning"], vertices
 
 
 def fitted_body(
@@ -139,9 +193,9 @@ def fitted_body(
     return pose_body(
         body,
         tensor(fit.phenotype)[None],
+        tensor(fit.local_changes)[None],
         tensor(fit.rotations[frames]),
         tensor(fit.translation[frames]),
-        tensor(fit.offsets),
     )
 
 
@@ -169,16 +223,32 @@ def fit_body(
     start = camera.unproject(centre, depth)
     params = _BodyParameters(body, body_yaw(preprocessed.keypoints), start).to(device)
 
-    rest = body(params.phenotype()[None], params.rotations()[:1], params.translations()[:1])
+    def rest_pose() -> dict[str, torch.Tensor]:
+        bones = torch.zeros(1, body.num_bones, 3, device=device)
+        return body(params.phenotype()[None], params.local_changes()[None], bones, bones[:, 0])
+
+    rest = rest_pose()
     samples = SurfaceSamples.draw(
         rest["rest_vertices"][0].detach(), body.faces, config.surface_samples
     )
-    radius = 0.8 * samples.spacing
-    laplacian = uniform_laplacian(body.faces, len(params.offsets))
+    radius = samples.radius
+    inset = config.silhouette_inset * radius
 
-    def pose() -> torch.Tensor:
-        phenotype, rotations = params.phenotype()[None], params.rotations()
-        return pose_body(body, phenotype, rotations, params.translations(), params.offsets)[1]
+    hand_joints = HandJoints(body, rest["rest_vertices"][0], rest["rest_bone_poses"][0])
+    hand_targets = torch.from_numpy(np.nan_to_num(preprocessed.hands)).float().to(device)
+    hand_confidence = hand_targets[..., 2] * (hand_targets[..., 2] >= MIN_HAND_CONFIDENCE)
+    hand_targets = hand_targets[..., :2] * scale
+
+    def pose() -> tuple[torch.Tensor, torch.Tensor]:
+        """``(N, V, 3)`` posed vertices and ``(N, 2, 21, 3)`` hand points."""
+        rest = rest_pose()
+        skinning, vertices = pose_body(
+            body, params.phenotype()[None], params.local_changes()[None], params.rotations(),
+            params.translations(),
+        )  # fmt: skip
+        heads = rest["rest_bone_poses"][0, :, :, 3]
+        joints = (skinning @ heads.unsqueeze(-1))[..., :3, 0]
+        return vertices, hand_joints(vertices, joints)
 
     def projected_keypoints(vertices: torch.Tensor) -> torch.Tensor:
         return camera.project(body.keypoint_regressor({"vertices": vertices}))
@@ -186,13 +256,11 @@ def fit_body(
     def height() -> torch.Tensor:
         """Height of the rest pose: a tall body far away and a short one close by look the same,
         so the configured height sets the scale."""
-        bones = torch.zeros(1, body.num_bones, 3, device=device)
-        rest = body(params.phenotype()[None], bones, bones[:, 0])["rest_vertices"][0]
-        z = (rest + params.offsets)[:, 2]
+        z = rest_pose()["rest_vertices"][0, :, 2]
         return z.max() - z.min()
 
     def loss(phase: int) -> dict[str, torch.Tensor]:
-        vertices = pose()
+        vertices, hands = pose()
         terms = {
             "height": config.height_weight * (height() / config.body_height - 1).square(),
             "keypoints": config.keypoint_weight
@@ -209,25 +277,24 @@ def fit_body(
                 + params.movement.square().sum(-1).mean()
                 + 100 * params.translation_residual.square().sum(-1).mean()
             ),
+            "shape_prior": config.local_change_weight * params.local_changes().square().sum(),
         }
         if phase >= 1:
-            silhouettes = render_silhouette(samples.points(vertices, body.faces), radius, camera)
-            terms["silhouette"] = config.silhouette_weight * silhouette_loss(silhouettes, masks)
-        if phase >= 2:
-            terms["detail"] = config.detail_weight * (
-                (laplacian @ params.offsets).square().mean() + 0.1 * params.offsets.square().mean()
+            terms["hands"] = config.hand_weight * keypoint_loss(
+                camera.project(hands), hand_targets, hand_confidence, camera.height
             )
+            points = samples.points(vertices, body.faces, inset)
+            silhouettes = render_silhouette(points, radius, camera)
+            terms["silhouette"] = config.silhouette_weight * silhouette_loss(silhouettes, masks)
         return terms
 
     placement = [params.yaw, params.tilt, params.translation, params.translation_residual]
     placement.append(params.phenotype_logit)
+    shape = [params.local_change_raw]
     phases = (
         [{"params": placement}],
         [{"params": placement + [params.pose, params.movement]}],
-        [
-            {"params": placement + [params.pose, params.movement]},
-            {"params": [params.offsets], "lr": config.learning_rate * 0.05},
-        ],
+        [{"params": placement + shape + [params.pose, params.movement]}],
     )
     for phase, (iterations, groups) in enumerate(zip(config.iterations, phases, strict=True)):
         optimizer = torch.optim.Adam(groups, lr=config.learning_rate)
@@ -243,17 +310,21 @@ def fit_body(
                 )  # fmt: skip
 
     with torch.no_grad():
-        vertices = pose()
-        silhouettes = render_silhouette(samples.points(vertices, body.faces), radius, camera)
+        vertices, _ = pose()
+        # The mesh's own outline, not the blobs': it is what the avatar shows.
+        silhouettes = torch.stack([
+            rasterize(camera.screen(v), body.faces, camera.width, camera.height).mask().float()
+            for v in vertices
+        ])  # fmt: skip
         distance = (projected_keypoints(vertices) - targets).norm(dim=-1) / scale
         seen = confidence > 0
         error = (distance * seen).sum(-1) / seen.sum(-1).clamp_min(1)
         return BodyFit(
             frame_indices=preprocessed.frame_indices,
             phenotype=params.phenotype().cpu().numpy(),
+            local_changes=params.local_changes().cpu().numpy(),
             rotations=params.rotations().cpu().numpy(),
             translation=params.translations().cpu().numpy(),
-            offsets=params.offsets.cpu().numpy(),
             fov_y_degrees=config.fov_y_degrees,
             image_size=np.array(image_size),
             silhouette_iou=silhouette_iou(silhouettes, masks).cpu().numpy(),

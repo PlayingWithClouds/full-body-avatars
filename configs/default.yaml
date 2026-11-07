@@ -13,12 +13,13 @@ preprocess:
   segmenter: facebook/sam2.1-hiera-large
   pose_estimator: usyd-community/vitpose-base-simple
   face_landmarker: ../assets/face_landmarker.task
+  hand_landmarker: ../assets/hand_landmarker.task
 
 body_models:
   ict_facekit: ../assets/ict-facekit
   max_bone_influences: 8
   neck_seam: 0.04
-  neck_overlap: 0.02
+  neck_blend: 0.03
 
 fitting:
   device: cuda
@@ -27,14 +28,16 @@ fitting:
   body_height: 1.65  # the performer's real height sets the avatar's scale
   height_weight: 10.0
   eye_distance: 0.063
-  surface_samples: 30000
+  surface_samples: 120000
+  silhouette_inset: 3.0
   iterations: [300, 800, 400]
   learning_rate: 0.01
   keypoint_weight: 1.0
+  hand_weight: 0.5
   silhouette_weight: 1.0
   pose_prior_weight: 0.01
   smoothness_weight: 1.0
-  detail_weight: 100.0
+  local_change_weight: 0.01
   identity_prior_weight: 0.001
   expression_sparsity_weight: 0.001
 
@@ -43,17 +46,28 @@ training:
   resolution: 1024
   num_gaussians: 200000
   head_density: 4.0
-  sh_degree: 1
+  hand_density: 0.0  # fingers are posed once per video and never match exactly: Gaussians smear
+  coverage_range: [0.3, 0.6]
+  occlusion_margin: 0.25
+  rebake_every: 2500
+  body_texture_size: 2048
+  head_texture_size: 1024
+  sh_degree: 0  # one colour per Gaussian: a single eye-level orbit cannot teach view-dependent colour
   iterations: 20000
   holdout_every: 10
   ssim_weight: 0.2
   mask_weight: 0.1
+  edge_band: 3
+  colour_weight: 0.05
+  head_colour_weight: 0.5
+  opacity_weight: 0.001
   offset_weight: 0.01
-  scale_weight: 1.0
-  max_scale: 2.0
-  elongation_weight: 1.0
+  max_offset: 0.01
+  max_height: 0.001
+  thickness: 0.0002
+  max_size: 0.006
   max_elongation: 4.0
-  flatness_weight: 0.01
+  pose_prior_weight: 0.01
   learning_rates:
     offsets: 0.001
     rotations: 0.001
@@ -61,3 +75,5 @@ training:
     opacities: 0.05
     sh_dc: 0.0025
     sh_rest: 0.000125
+    colours: 0.0005
+    poses: 0.0005

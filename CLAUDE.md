@@ -5,13 +5,15 @@ engine. Built from three turntable videos; the performer is under contract with 
 
 ## Approach
 
-- Gaussians are bound to the triangles of one skinned mesh, so an engine poses the avatar the way
-  it poses a skinned character. Not a static 3DGS scene.
+- Gaussians are bound to the triangles of one skinned, textured mesh and drawn over it, so an
+  engine poses the avatar the way it poses a skinned character. Not a static 3DGS scene. The
+  mesh shows where the videos saw too little for Gaussians (coverage gating), and alone it is
+  the far-distance fallback.
 - The mesh is the **Anny** body (NAVER LABS; code Apache-2.0, assets CC0, no adult-use
   restriction). Anny's own head is too poor for faces, so it gets replaced by a better head model,
   joined at the neck in `body_models/hybrid.py`; Gaussians bind to the joined mesh, so the runtime
   sees one rig.
-- The head model is the **ICT-FaceKit** light model (MIT; https://github.com/USC-ICT/ICT-FaceKit,
+- The head model is the **ICT-FaceKit** light model (MIT; <https://github.com/USC-ICT/ICT-FaceKit>,
   cloned into `assets/ict-facekit`): 100 identity shapes, 53 ARKit-named expression blendshapes
   (game face animation and phone capture speak ARKit), teeth, gums, tongue, mouth socket, eyes.
   It has no jaw bone; the jaw moves through blendshapes.
@@ -24,11 +26,11 @@ engine. Built from three turntable videos; the performer is under contract with 
 
 `examples/` holds the videos (gitignored, never commit them):
 
-| Config name        | File                          | Content                         |
-| ------------------ | ----------------------------- | ------------------------------- |
-| `body`             | `fullbody.mp4`                | Full-body turntable, 960x1664   |
-| `head_static`      | `head_turntable_00004_.mp4`   | Head turntable, 1280x1280       |
-| `head_expressions` | `head_grimace_00004_.mp4`     | Face making expressions         |
+| Config name        | File                        | Content                       |
+| ------------------ | --------------------------- | ----------------------------- |
+| `body`             | `fullbody.mp4`              | Full-body turntable, 960x1664 |
+| `head_static`      | `head_turntable_00004_.mp4` | Head turntable, 1280x1280     |
+| `head_expressions` | `head_grimace_00004_.mp4`   | Face making expressions       |
 
 - The videos are **generated** (Wan via ComfyUI) from a reference of the performer: 81 frames at
   16 fps each, hence `frame_step: 1`. The user has checked they look consistent across views.
@@ -41,7 +43,7 @@ engine. Built from three turntable videos; the performer is under contract with 
 
 All stages run end to end (`go-task pipeline`); the README explains each. Outputs:
 `outputs/preprocess/<video>.npz`, `outputs/fitting/{body,head_static,head_expressions,avatar}.npz`,
-`outputs/training/{gaussians,evaluation}.npz`, `outputs/export/performer.avatar`.
+`outputs/training/{gaussians,textures,colours,evaluation}.npz`, `outputs/export/performer.avatar`.
 
 Conventions every stage relies on:
 
@@ -63,9 +65,44 @@ keypoints ~14 px; head IoU ~0.97, landmarks ~20 px; the head turntable's last fr
 degrees. The FOV (30°) is a guess for generated videos and is not fitted.
 
 Known gaps: one eye-level orbit leaves the top of the head, soles, armpits, inner thighs and
-crotch barely seen; Anny has no genital anatomy (only smooth vertex offsets so far); fingers are
-not posed in fitting; the Gaussian count is fixed (no densification); there is no engine-side
-renderer yet, only the Python reference runtime.
+crotch barely seen (they get filled-in texture, no Gaussians); Anny has no genital anatomy; fingers are posed once for the whole video, from MediaPipe
+hand landmarks; the Gaussian count is fixed (no densification); the browser viewer in `viewer/` is
+the closest thing to an engine-side renderer so far.
+
+Lessons from earlier runs:
+
+- Per-vertex body offsets fitted to silhouettes hide pose errors by warping the surface: free
+  ones folded it (flaps along the arms, spiky hands), normal-only ones still made a step at the
+  elbow and boxy breasts. The body's shape is Anny's phenotype plus its smooth local changes.
+- Gaussians spend themselves covering the mesh's errors: sizes and offsets are hard limits, and
+  the hands get none (fingers are posed once per video and never match every frame). Free to
+  tilt and float, the body's formed a layer like fur: they are discs lying on the skin.
+- The generated turntable is not rigid: the performer sways and her arms drift by centimetres.
+  The spine and limbs get small, smooth per-frame rotations in the body fit.
+- Per-frame parameters each need their own `Parameter`: in one tensor, Adam's momentum keeps
+  moving frames that were not rendered, a random walk that cost 2-4 dB.
+- Anny's "head" part ends near the chin, so the neck cut follows the region connected to the
+  top of the head, not the part labels.
+- Textures learned texel by texel turn into noise (rarely seen texels get optimizer steps as big
+  as often seen ones): they are baked, and baked again during training from corrected poses.
+- The avatar shimmered when turned, even with view-dependent colour off: overlapping opaque
+  Gaussians disagreed in colour, and the blending order picks which one shows. Gaussians' colours
+  are now the texture's plus a penalised correction, opacity is penalised, sizes are capped in
+  metres. Orbit-frame PSNR cannot see this; the evaluation's `view_spread` can (textured mesh
+  alone: under 0.002), for the body and the head. Most of the head's came from
+  Gaussians the occlusion margin let show from behind the nose, lips and ears.
+- The masks' edges mix skin with the grey backdrop; Gaussians fitted to them turn blue-grey when
+  seen face-on. Colours are not compared within `edge_band` pixels of the mask edge.
+- Score PSNR on the performer only (`scored_pixels`); empty background inflates it by ~7 dB.
+
+## Browser viewer
+
+`viewer/` (SvelteKit 3, Svelte 5, Tailwind 4, three.js; bun) renders `.avatar` files as the game
+should: CPU skinning on pose changes, the textured mesh, then Gaussians placed on their triangles
+in a vertex shader, each hidden whole by the mesh's depth at its centre (as training does; a
+per-pixel test cuts splats along slanted skin), sorted back to front by their true centres.
+`go-task viewer` serves it with the exported avatar; `.avatar` files in `viewer/static/` are
+gitignored. three.js needs splat quads drawn double-sided: their winding follows the ellipse.
 
 ## Commands
 
@@ -82,6 +119,7 @@ go-task preprocess   # or: go-task preprocess -- body
 go-task fit          # ~3 min
 go-task train        # ~5 min for 20k steps
 go-task export
+go-task viewer       # http://localhost:5173
 ```
 
 ## Rules for editing
@@ -107,7 +145,7 @@ go-task export
 - Heavy imports (torch, transformers) stay out of CLI commands that don't need them.
 - No speculative abstractions, stubs or placeholder files: add code, notebooks and dependencies
   with the stage that uses them.
-- Docstrings say shapes and units of arrays, e.g. ``(N, 17, 3)`` x, y in pixels and confidence.
+- Docstrings say shapes and units of arrays, e.g. `(N, 17, 3)` x, y in pixels and confidence.
 - Missing detections are NaN, not dropped rows, so arrays stay aligned with `frame_indices`.
 - ruff (line length 100) and ruff format; the pre-commit ruff version matches the one in `uv.lock`.
 
@@ -121,11 +159,19 @@ go-task export
 - Managed with uv. torch and torchvision come from the PyTorch CUDA 13.2 index (`pytorch-cu132`
   in `pyproject.toml`); the machine has an RTX 4080 SUPER and CUDA 13.3. gsplat compiles its CUDA
   kernels on first use (about a minute).
-- Commercial **and pornographic** use is required. Check every license for both before adding
-  anything; content clauses (e.g. FLAME 2023 Open's ban on pornographic use) rule things out even
-  under otherwise open licenses. Ruled out: the `smplx` package and SMPL/SMPL-X (MPI
-  non-commercial; also Anny's `smplx` topology, and the `anny[smpl]` extra), Sapiens (CC-BY-NC),
-  nvdiffrast (NVIDIA non-commercial), MICA and metrical-tracker assets, all FLAME versions.
+- The project is non-commercial, but its use is **pornographic**. Check every license for
+  non-commercial use (not only "research" or "evaluation") and for content clauses before adding
+  anything: content clauses (e.g. FLAME 2023 Open's ban on pornographic use) rule things out even
+  under otherwise open licenses, and dataset terms can bind the models trained on them. Ruled out:
+  the `smplx` package and SMPL/SMPL-X (MPI licenses ban pornographic use even non-commercially;
+  also Anny's `smplx` topology, and the `anny[smpl]` extra), models trained on BEDLAM or AGORA
+  (the same ban, which Multi-HMR 2's NOTICE carries over to its checkpoint), MICA and
+  metrical-tracker assets, all FLAME versions. Mesh rasterization is our own
+  (`rendering/rasterize.py`, plain PyTorch); nvdiffrast is research/evaluation only.
 - ICT-FaceKit's MIT license covers its repository; its scripts are not run, only its OBJ and
   JSON files are read. Its "full model" comes under a separate USC license; stay on the light model.
 - Third-party model files go in `assets/` (gitignored); Hugging Face models download on first use.
+
+### Code
+
+Use Read/Write/Edit instead of sed/awk unless you're refactoring a lot of text.

@@ -42,7 +42,7 @@ def fit_capture(config: Config) -> dict[str, Path]:
         fit.save(written[video])
 
     head = head.to(device)
-    body_rest = rest_body(body, body_fit.phenotype, body_fit.offsets)
+    body_rest = rest_body(body, body_fit.phenotype, body_fit.local_changes)
     head_rest = rest_head(head, next(iter(head_fits.values())).identity)
     placement = match_heads(body, body_rest, head, head_rest)
     placement = place_head(

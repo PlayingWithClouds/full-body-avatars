@@ -23,6 +23,7 @@ import numpy as np
 
 from avatar_splats.body_models.hybrid import Avatar
 from avatar_splats.gaussians import GaussianRecord
+from avatar_splats.training.textures import TextureRecord
 
 MAGIC = b"AVATAR01"
 ALIGNMENT = 16
@@ -34,11 +35,19 @@ class AvatarFile:
     arrays: dict[str, np.ndarray]
 
 
-def avatar_arrays(avatar: Avatar, gaussians: GaussianRecord) -> AvatarFile:
-    """Collect the avatar and its Gaussians into the file's arrays, in the runtime's dtypes."""
+def avatar_arrays(
+    avatar: Avatar, gaussians: GaussianRecord, textures: TextureRecord, occlusion_margin: float
+) -> AvatarFile:
+    """Collect the avatar, its textures and its Gaussians into the file's arrays, in the
+    runtime's dtypes. Textures are 8-bit RGB, their first row at the top (v = 1).
+
+    Args:
+        occlusion_margin: how far, in sizes of its triangle, a Gaussian may lie behind the mesh
+            and still be drawn; the margin training used.
+    """
     quaternions = gaussians.rotations / np.linalg.norm(gaussians.rotations, axis=-1, keepdims=True)
     metadata = {
-        "format_version": 1,
+        "format_version": 2,
         "units": "metres",
         "up_axis": "+z",
         "forward_axis": "-y",
@@ -47,10 +56,16 @@ def avatar_arrays(avatar: Avatar, gaussians: GaussianRecord) -> AvatarFile:
         "head_start": int(avatar.head_start),
         "sh_degree": int(np.sqrt(gaussians.sh.shape[1])) - 1,
         "quaternion_order": "wxyz",
+        "textures": ["body_texture", "head_texture"],
+        "occlusion_margin": occlusion_margin,
     }
     arrays = {
         "rest_vertices": avatar.rest_vertices.astype(np.float32),
         "faces": avatar.faces.astype(np.uint32),
+        "uvs": avatar.uvs.astype(np.float32),
+        "face_textures": avatar.face_textures.astype(np.uint8),
+        "body_texture": _bytes(textures.body),
+        "head_texture": _bytes(textures.head),
         "bone_indices": avatar.bone_indices.astype(np.uint16),
         "bone_weights": avatar.bone_weights.astype(np.float32),
         "bone_parents": avatar.bone_parents.astype(np.int32),
@@ -65,6 +80,10 @@ def avatar_arrays(avatar: Avatar, gaussians: GaussianRecord) -> AvatarFile:
         "gaussian_sh": gaussians.sh.astype(np.float32),
     }
     return AvatarFile(metadata, arrays)
+
+
+def _bytes(texture: np.ndarray) -> np.ndarray:
+    return np.round(np.clip(texture, 0, 1) * 255).astype(np.uint8)
 
 
 def write_avatar(path: str | Path, file: AvatarFile) -> None:

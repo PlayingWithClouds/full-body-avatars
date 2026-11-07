@@ -142,12 +142,38 @@ class BoundGaussians(torch.nn.Module):
         rotations = _xyzw_to_wxyz(roma.rotmat_to_unitquat(frames @ self._local_rotations()))
         return means, rotations, self.log_scales.exp() * size
 
-    def flatness(self) -> torch.Tensor:
-        """``(G,)`` how flat each Gaussian lies on its triangle: the cosine between its thinnest
-        axis and the triangle's normal, 1 when lying flat, 0 when standing up like a fin."""
-        thinnest = self.log_scales.argmin(dim=-1)
-        axis = self._local_rotations()[torch.arange(len(self), device=thinnest.device), :, thinnest]
-        return axis[:, 2].abs()
+    def triangle_sizes(self, vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
+        """``(G,)`` the size of each Gaussian's triangle on ``(V, 3)`` posed vertices."""
+        return triangle_frames(vertices, faces[self.faces])[1]
+
+    @torch.no_grad()
+    def limit_scales(self, max_log_scales: torch.Tensor, max_elongation: float) -> None:
+        """Shrink axes in place to at most ``(G,)`` log scales, and each Gaussian's longest axis
+        to at most ``max_elongation`` times its middle one."""
+        middle = self.log_scales.sort(dim=-1).values[:, 1]
+        limit = torch.minimum(max_log_scales, middle + math.log(max_elongation))
+        self.log_scales.copy_(torch.minimum(self.log_scales, limit.unsqueeze(-1)))
+
+    @torch.no_grad()
+    def limit_offsets(self, max_offsets: torch.Tensor) -> None:
+        """Pull Gaussians in place to at most ``(G,)`` offsets from their anchors, in triangle
+        sizes."""
+        lengths = self.offsets.norm(dim=-1, keepdim=True)
+        self.offsets.mul_((max_offsets.unsqueeze(-1) / lengths.clamp_min(1e-12)).clamp(max=1))
+
+    @torch.no_grad()
+    def lay_flat(self, max_heights: torch.Tensor, log_thicknesses: torch.Tensor) -> None:
+        """Lay the Gaussians in place on their triangles, as discs on the skin: turned only about
+        the triangle's normal, ``(G,)`` log thicknesses along it, and at most ``(G,)`` heights
+        above or below the triangle. All in triangle sizes."""
+        self.rotations[:, 1:3] = 0
+        lengths = self.rotations.norm(dim=-1, keepdim=True)
+        unturned = self.rotations.new_tensor([1.0, 0, 0, 0])
+        self.rotations.copy_(torch.where(lengths > 1e-6, self.rotations / lengths, unturned))
+        self.log_scales[:, 2] = log_thicknesses
+        # No narrower than thick, so the thickness stays the shortest axis.
+        self.log_scales[:, :2] = torch.maximum(self.log_scales[:, :2], log_thicknesses[:, None])
+        self.offsets[:, 2] = self.offsets[:, 2].clamp(-max_heights, max_heights)
 
     def _local_rotations(self) -> torch.Tensor:
         """``(G, 3, 3)`` rotations relative to the triangles' frames."""

@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from avatar_splats.body_models.mesh import read_obj, read_obj_vertices
+from avatar_splats.body_models.mesh import read_obj, read_obj_uvs, read_obj_vertices
 
 CENTIMETRE = 0.01
 """ICT-FaceKit is modelled in centimetres; this module works in metres."""
@@ -33,6 +33,11 @@ EYEBALLS = slice(21451, 24591)
 LEFT_EYEBALL = slice(21451, 23021)
 RIGHT_EYEBALL = slice(23021, 24591)
 
+UV_TILES = 5
+"""Tiles side by side in the head's texture atlas. ICT-FaceKit lays its UVs out in four tiles
+(u from 0 to 4: the face; the head, neck and mouth; the mouth's interior); the eyeballs' UVs
+overlap the face's, so they move to a fifth tile."""
+
 
 class IctFaceKit(torch.nn.Module):
     """Head vertices as the neutral mesh plus weighted identity and expression blendshapes.
@@ -50,6 +55,9 @@ class IctFaceKit(torch.nn.Module):
     """``(E, V, 3)`` expression blendshapes for weights from 0 to 1."""
     landmarks: torch.Tensor
     """``(68,)`` vertex indices of the Multi-PIE 68 facial landmarks."""
+    uvs: torch.Tensor
+    """``(F, 3, 2)`` texture coordinates of the triangles' corners in the head's atlas, in
+    [0, 1] with v up."""
 
     def __init__(self, directory: str | Path, num_identities: int = 100):
         super().__init__()
@@ -58,7 +66,11 @@ class IctFaceKit(torch.nn.Module):
 
         neutral, faces = read_obj(model / "generic_neutral_mesh.obj")
         neutral = neutral[:NUM_KEPT_VERTICES]
-        faces = faces[faces.max(axis=1) < NUM_KEPT_VERTICES]
+        kept = faces.max(axis=1) < NUM_KEPT_VERTICES
+        faces = faces[kept]
+        uvs = read_obj_uvs(model / "generic_neutral_mesh.obj")[kept]
+        uvs[faces.min(axis=1) >= EYEBALLS.start, :, 0] += UV_TILES - 1
+        uvs[..., 0] /= UV_TILES
 
         def basis(names: list[str]) -> torch.Tensor:
             meshes = [
@@ -69,6 +81,7 @@ class IctFaceKit(torch.nn.Module):
         self.expression_names: tuple[str, ...] = tuple(config["expressions"])
         self.register_buffer("neutral", torch.from_numpy(neutral * CENTIMETRE))
         self.register_buffer("faces", torch.from_numpy(faces))
+        self.register_buffer("uvs", torch.from_numpy(uvs))
         self.register_buffer(
             "identity_basis", basis([f"identity{i:03d}" for i in range(num_identities)])
         )
