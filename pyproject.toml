@@ -5,6 +5,7 @@ description = "Re-posable Gaussian splat avatars from turntable video, bound to 
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "anny>=0.6.2",
     "av>=14",
     "gsplat>=1.5.3",
     "mediapipe>=0.10",
@@ -30,6 +31,7 @@ notebooks = [
     "ipykernel>=6",
     "jupyterlab>=4",
     "matplotlib>=3.9",
+    "plotly>=6",
 ]
 
 [tool.uv]

@@ -13,3 +13,47 @@ preprocess:
   segmenter: facebook/sam2.1-hiera-large
   pose_estimator: usyd-community/vitpose-base-simple
   face_landmarker: ../assets/face_landmarker.task
+
+body_models:
+  ict_facekit: ../assets/ict-facekit
+  max_bone_influences: 8
+  neck_seam: 0.04
+  neck_overlap: 0.02
+
+fitting:
+  device: cuda
+  resolution: 512
+  fov_y_degrees: 30
+  body_height: 1.65  # the performer's real height sets the avatar's scale
+  height_weight: 10.0
+  eye_distance: 0.063
+  surface_samples: 30000
+  iterations: [300, 800, 400]
+  learning_rate: 0.01
+  keypoint_weight: 1.0
+  silhouette_weight: 1.0
+  pose_prior_weight: 0.01
+  smoothness_weight: 1.0
+  detail_weight: 100.0
+  identity_prior_weight: 0.001
+  expression_sparsity_weight: 0.001
+
+training:
+  device: cuda
+  resolution: 1024
+  num_gaussians: 200000
+  head_density: 4.0
+  sh_degree: 1
+  iterations: 20000
+  holdout_every: 10
+  ssim_weight: 0.2
+  mask_weight: 0.1
+  offset_weight: 0.01
+  scale_weight: 0.01
+  learning_rates:
+    offsets: 0.001
+    rotations: 0.001
+    scales: 0.005
+    opacities: 0.05
+    sh_dc: 0.0025
+    sh_rest: 0.000125

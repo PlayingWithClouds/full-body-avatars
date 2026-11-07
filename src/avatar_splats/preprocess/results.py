@@ -1,15 +1,16 @@
-"""The per-frame results of preprocessing one video, and their file format."""
+"""The per-frame results of preprocessing one video."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
+from avatar_splats.records import ArrayRecord
+
 
 @dataclass(frozen=True)
-class Preprocessed:
+class Preprocessed(ArrayRecord):
     """Everything preprocessing found in one video.
 
     Every array has one entry per processed frame. Frames where nothing was found hold NaN.
@@ -26,13 +27,3 @@ class Preprocessed:
     face_landmarks: np.ndarray | None = None
     """``(N, 478, 3)`` float: MediaPipe face landmarks as x, y in pixels and depth, in pixels
     of image width, relative to the head's center."""
-
-    def save(self, path: str | Path) -> None:
-        arrays = {name: value for name, value in vars(self).items() if value is not None}
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(path, **arrays)
-
-    @classmethod
-    def load(cls, path: str | Path) -> Preprocessed:
-        with np.load(path) as data:
-            return cls(**{name: data[name] for name in data.files})

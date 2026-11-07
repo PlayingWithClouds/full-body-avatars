@@ -44,3 +44,26 @@ tasks:
     desc: "Preprocess the capture videos (all, or name them: task preprocess -- body)"
     cmds:
       - uv run avatar-splats preprocess {{.CLI_ARGS}}
+
+  fit:
+    desc: Fit the body and head models and build the avatar's mesh
+    cmds:
+      - uv run avatar-splats fit
+
+  train:
+    desc: Train the avatar's Gaussians
+    cmds:
+      - uv run avatar-splats train
+
+  export:
+    desc: Write the avatar file for the game runtime
+    cmds:
+      - uv run avatar-splats export
+
+  pipeline:
+    desc: Run every stage, from the videos to the avatar file
+    cmds:
+      - task: preprocess
+      - task: fit
+      - task: train
+      - task: export

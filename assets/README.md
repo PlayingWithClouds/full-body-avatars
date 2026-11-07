@@ -1,10 +1,16 @@
 # Model assets
 
-Third-party body models are downloaded here and are not committed. Each comes under its own
-license; read it before shipping anything built from them.
+Third-party models live here and are not committed. Each comes under its own license; check it
+allows commercial and adult use before shipping anything built from it.
 
-- **Anny**: the body model, from NAVER LABS Europe.
-- **FLAME 2023**: the head model, from the Max Planck Institute for Intelligent Systems
-  (registration required at https://flame.is.tue.mpg.de).
+- **ICT-FaceKit** (MIT), the head model: clone it into `ict-facekit/`.
 
-The download steps arrive with the `body_models` stage.
+  ```sh
+  git clone --depth 1 https://github.com/USC-ICT/ICT-FaceKit.git assets/ict-facekit
+  ```
+
+  Only its OBJ and JSON files are read; its scripts are never run.
+- **MediaPipe face landmarker** (Apache-2.0): downloaded to `face_landmarker.task` on first use.
+
+Anny's data (code Apache-2.0, assets CC0) comes with its Python package and is cached in
+`~/.cache/anny`. Hugging Face models are cached in `~/.cache/huggingface`.

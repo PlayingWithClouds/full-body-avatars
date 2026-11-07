@@ -21,6 +21,26 @@ wheels = [
 ]
 
 [[package]]
+name = "anny"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "roma" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "trimesh" },
+    { name = "warp-lang" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/8b/e62b5ce45f234d0f8ee07956d7fa3ef831debdb427e50b07128e5281e017/anny-0.6.2.tar.gz", hash = "sha256:270ef9ce790a940199f79b66556a11f9b90793e4bbe7ce8242f31442cde4c9ea", size = 47614103, upload-time = "2026-10-26T10:36:40.571Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5d/da/f0c21b55e0880e19dc109fc7f414447e2e78101068ebf6368ede77b1c958/anny-0.6.2-py3-none-any.whl", hash = "sha256:bad70bdc2be0dfa9880d60129c3a1339678f08f493184f637dc2825c3e27b8d2", size = 47711600, upload-time = "2026-10-26T10:36:26.423Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -137,6 +157,7 @@ name = "avatar-splats"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anny" },
     { name = "av" },
     { name = "gsplat" },
     { name = "mediapipe" },
@@ -159,10 +180,12 @@ notebooks = [
     { name = "ipykernel" },
     { name = "jupyterlab" },
     { name = "matplotlib" },
+    { name = "plotly" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "anny", specifier = ">=0.6.2" },
     { name = "av", specifier = ">=14" },
     { name = "gsplat", specifier = ">=1.5.3" },
     { name = "mediapipe", specifier = ">=0.10" },
@@ -185,6 +208,7 @@ notebooks = [
     { name = "ipykernel", specifier = ">=6" },
     { name = "jupyterlab", specifier = ">=4" },
     { name = "matplotlib", specifier = ">=3.9" },
+    { name = "plotly", specifier = ">=6" },
 ]
 
 [[package]]
@@ -1175,6 +1199,15 @@ wheels = [
 ]
 
 [[package]]
+name = "narwhals"
+version = "2.28.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/43/e11d75a7fb635c6f63dd6e176cb3e050ec2fee35f2f2267b332a6ad351ec/narwhals-2.28.0.tar.gz", hash = "sha256:2d9860c80d6610820826e94c6e42ce4b1d92d89cdd479586e652a8d211dab345", size = 754977, upload-time = "2026-10-27T12:19:33.777Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cf/82/8ef9c7e0f50493307a49c09cfa7f00c5a778b6d1921f7b2dabe1d3a5809e/narwhals-2.28.0-py3-none-any.whl", hash = "sha256:1f69d6385ec30e2fa6e1fdeb37c562ecabd0f713f6f3e3b58a668c5c9df9567f", size = 490591, upload-time = "2026-10-27T12:19:31.649Z" },
+]
+
+[[package]]
 name = "nbclient"
 version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1558,6 +1591,19 @@ wheels = [
 ]
 
 [[package]]
+name = "plotly"
+version = "7.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "narwhals" },
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/49/c3/72b369f5ed7701b04ab0ea3dcf83e9bbce71c0b3bc6f07f87568550d09ea/plotly-7.1.0.tar.gz", hash = "sha256:f860166a4a3d78c69cb1f4a15f28a5c8283eade98a282a698f3bb853a449ace5", size = 6689315, upload-time = "2026-09-15T19:21:21.75Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/7d/905a3a3d51087515719058c94cfbda2ff0fc14417c20d557ae3e82d8b250/plotly-7.1.0-py3-none-any.whl", hash = "sha256:dbb7fa18afce40d0a8e80d1bf162eceb3faa0ce5a77fe741ad09a74cf78f53f3", size = 9692368, upload-time = "2026-09-15T19:21:18.331Z" },
+]
+
+[[package]]
 name = "pluggy"
 version = "1.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1866,6 +1912,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13a6a0c696dacf35430f72e0ec571c4275d2371fca3e9/rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36", size = 230680, upload-time = "2026-04-12T08:24:00.75Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb", size = 310654, upload-time = "2026-04-12T08:24:02.83Z" },
+]
+
+[[package]]
+name = "roma"
+version = "1.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/20/86/731e1310e51925f1bf5235c1269f257079171b6051fd03d50ba9ccbffb90/roma-1.8.0.tar.gz", hash = "sha256:7958926c776b4365776a51faebee9e202f6fd1905ddda0a36a91b94160d088d4", size = 339599, upload-time = "2026-10-22T10:40:32.909Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3c/90/9b723c3fef1820dd94f30bde8bee75ed08f65b1a6c34a86cfd4e4b8d7a59/roma-1.8.0-py3-none-any.whl", hash = "sha256:5096d77f807da25537d570714bdb5d6cc93b247f95f332abe2836600b1ddf8e8", size = 35374, upload-time = "2026-10-22T10:40:31.338Z" },
 ]
 
 [[package]]
@@ -2218,6 +2277,18 @@ wheels = [
 ]
 
 [[package]]
+name = "trimesh"
+version = "5.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/77/8a/0798e6cd28e2d1c6a7dfc97ba8eb27f7da5f392a5c81147d4f1e41ce0c1b/trimesh-5.2.0.tar.gz", hash = "sha256:d0a845d058e5a4ff145d0f0082d80c58d761687ce389c79d422dbe774966957b", size = 880133, upload-time = "2026-10-24T01:10:30.021Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/14/78624d9c89bab76c2a2e1e839c7641fa686828c2c1c8fb64aedf3b371a5d/trimesh-5.2.0-py3-none-any.whl", hash = "sha256:04db2c7ec62afdd7763fb04c82bb5f257ddd984993a19ee83697f475fc58fd29", size = 751459, upload-time = "2026-10-24T01:10:27.874Z" },
+]
+
+[[package]]
 name = "triton"
 version = "3.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2309,6 +2380,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ea/bf/4caf1aada6c84eb3fadf9341a90367f436a759692456e1a234d444d428ee/wadler_lindig-0.1.8.tar.gz", hash = "sha256:1a94d51cd26100dda9e430c64539c5b92b9788c87f10db3e1c87503ab814411a", size = 16256, upload-time = "2026-10-25T19:06:02.92Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/00/0b/b170089cd44848f25dbc9efda08e5aa4a8402d9a13f0d4d0f3d7808be539/wadler_lindig-0.1.8-py3-none-any.whl", hash = "sha256:8671e8c98449ae3f4e4ba720eccd63a502b3983042f8d112b49a9c6be49e8d92", size = 20840, upload-time = "2026-10-25T19:06:01.79Z" },
+]
+
+[[package]]
+name = "warp-lang"
+version = "1.19.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/23/5ebb66c804c1107ebff3375707ec94ea1db99842d9b850f746ec925dddf1/warp_lang-1.19.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:310e7dcd9b4afa1ea45bf2304d793efc88f7317182e996b2077b069a0e34d3a0", size = 28197738, upload-time = "2026-11-02T04:43:42.014Z" },
+    { url = "https://files.pythonhosted.org/packages/17/e9/7da1fc1cd4b677477cc0d232351a9567dd69f45709da5600a91961e36eeb/warp_lang-1.19.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:c797f5f4aa9925f676e20dd28e5416fee794499f3f3c0a5b66f2d4dfc2de9e32", size = 149277474, upload-time = "2026-11-02T04:44:08.599Z" },
+    { url = "https://files.pythonhosted.org/packages/91/f8/ac0178789ed8a4c18814fe75cf65286523218f5159c46e212313d142a32a/warp_lang-1.19.0-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:bc1511b8d5d987a69c2b18edbad721a8949b9f3622a91e3f9187a208fa9e3fab", size = 147782157, upload-time = "2026-11-02T04:44:46.23Z" },
+    { url = "https://files.pythonhosted.org/packages/82/d5/d345c030772d3493a51a8beb3e7f71b6f5e41742072db0cdbcd1461ea94e/warp_lang-1.19.0-py3-none-win_amd64.whl", hash = "sha256:bb4865dde4c2ae916d3d2a4e20ed1cd406e1d0a76ae722c3c574a9d43385c4d9", size = 134934525, upload-time = "2026-11-02T04:45:12.984Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/d2/6f202a406e74cc7107082070645901f36365ca05b8ff01a91820a10fb096/warp_lang-1.19.0-py3-none-win_arm64.whl", hash = "sha256:4f422ccdb3f5509e6386c0f178071d0da43e872e7af40dba594f03507af10182", size = 88124672, upload-time = "2026-11-02T04:46:15.468Z" },
 ]
 
 [[package]]

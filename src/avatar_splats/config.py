@@ -47,11 +47,75 @@ class PreprocessConfig:
 
 
 @dataclass(frozen=True)
+class BodyModelsConfig:
+    ict_facekit: Path
+    """Clone of https://github.com/USC-ICT/ICT-FaceKit."""
+    max_bone_influences: int
+    """Bones per vertex in the avatar's skinning."""
+    neck_seam: float
+    """How far below the chin, in metres, the body's neck meets the head model's."""
+    neck_overlap: float
+    """How far, in metres, the body's and the head model's necks overlap around the seam."""
+
+
+@dataclass(frozen=True)
+class FittingConfig:
+    device: str
+    resolution: int
+    """Long side, in pixels, of the images the models are fitted to."""
+    fov_y_degrees: float
+    """Vertical field of view of the camera, the same for all videos."""
+    body_height: float
+    """The performer's height in metres. Video alone cannot tell a tall person far away from a
+    short one close by, so this sets the avatar's scale."""
+    height_weight: float
+    eye_distance: float
+    """Initial guess of the distance between the pupils in metres, to place the head."""
+    surface_samples: int
+    """Points spread over a mesh to render its silhouette."""
+    iterations: list[int]
+    """Iterations of the three fitting phases: placement, shape and pose, surface detail."""
+    learning_rate: float
+    keypoint_weight: float
+    silhouette_weight: float
+    pose_prior_weight: float
+    smoothness_weight: float
+    detail_weight: float
+    """Smoothness of the per-vertex offsets that fit the surface detail."""
+    identity_prior_weight: float
+    expression_sparsity_weight: float
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    device: str
+    resolution: int
+    """Long side, in pixels, of the training images."""
+    num_gaussians: int
+    head_density: float
+    """How much more densely the head is covered than the body, per area."""
+    sh_degree: int
+    iterations: int
+    holdout_every: int
+    """Every n-th frame is kept out of training to measure quality."""
+    ssim_weight: float
+    mask_weight: float
+    offset_weight: float
+    """Keeps Gaussians near their triangles."""
+    scale_weight: float
+    """Keeps Gaussians from growing much beyond their triangles."""
+    learning_rates: dict[str, float]
+
+
+@dataclass(frozen=True)
 class Config:
     capture: CaptureConfig
     outputs: Path
     """Directory the stages write their results to."""
     preprocess: PreprocessConfig
+    body_models: BodyModelsConfig
+    fitting: FittingConfig
+    training: TrainingConfig
 
 
 def load_config(path: str | Path) -> Config:
