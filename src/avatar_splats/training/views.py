@@ -102,12 +102,19 @@ def _scaled_camera(camera: Camera, resolution: int) -> Camera:
 
 
 def _load(
-    path, preprocessed: Preprocessed, camera: Camera, device
+    path, preprocessed: Preprocessed, camera: Camera, device, chunk: int = 8
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Frames as ``(N, H, W, 3)`` uint8 and masks as ``(N, H, W)`` float, at the camera's size.
+
+    Frames are resized a few at a time: as floats, a whole video would not fit the GPU.
+    """
     frames = np.stack(list(read_frames(path)))[preprocessed.frame_indices]
     size = (camera.height, camera.width)
-    images = torch.from_numpy(frames).to(device).permute(0, 3, 1, 2).float()
-    images = F.interpolate(images, size, mode="area").round().byte().permute(0, 2, 3, 1)
-    masks = torch.from_numpy(preprocessed.masks).to(device).float()
-    masks = F.interpolate(masks[:, None], size, mode="area")[:, 0]
-    return images, masks
+    images, masks = [], []
+    for start in range(0, len(frames), chunk):
+        batch = torch.from_numpy(frames[start : start + chunk]).to(device)
+        batch = F.interpolate(batch.permute(0, 3, 1, 2).float(), size, mode="area")
+        images.append(batch.round().byte().permute(0, 2, 3, 1))
+        mask = torch.from_numpy(preprocessed.masks[start : start + chunk]).to(device).float()
+        masks.append(F.interpolate(mask[:, None], size, mode="area")[:, 0])
+    return torch.cat(images), torch.cat(masks)

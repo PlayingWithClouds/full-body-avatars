@@ -8,6 +8,7 @@ fits are taken as they are; the Gaussians absorb what they got slightly wrong.
 from __future__ import annotations
 
 import logging
+import math
 import random
 from collections import defaultdict
 from dataclasses import dataclass
@@ -161,13 +162,17 @@ def _loss(
         return (values * region).sum() / area
 
     mask = F.binary_cross_entropy(alpha.clamp(1e-5, 1 - 1e-5), view.mask, reduction="none")
+    _, middle, longest = gaussians.log_scales.sort(dim=-1).values.unbind(-1)
     return {
         "l1": (1 - config.ssim_weight) * within((image - goal).abs().mean(-1)),
         "ssim": config.ssim_weight * within(1 - ssim(image, goal)),
         "mask": config.mask_weight * within(mask),
         "offsets": config.offset_weight * gaussians.offsets.square().sum(-1).mean(),
         "scales": config.scale_weight
-        * F.relu(gaussians.log_scales.exp() - 1).square().sum(-1).mean(),
+        * F.relu(longest - math.log(config.max_scale)).square().mean(),
+        "elongation": config.elongation_weight
+        * F.relu(longest - middle - math.log(config.max_elongation)).square().mean(),
+        "flatness": config.flatness_weight * (1 - gaussians.flatness()).mean(),
     }
 
 

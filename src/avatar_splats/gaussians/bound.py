@@ -139,11 +139,20 @@ class BoundGaussians(torch.nn.Module):
         anchors = (self.barycentric.unsqueeze(-1) * corners).sum(dim=1)
         size = size.unsqueeze(-1)
         means = anchors + (frames @ (self.offsets * size).unsqueeze(-1)).squeeze(-1)
-        local = roma.unitquat_to_rotmat(
-            _wxyz_to_xyzw(torch.nn.functional.normalize(self.rotations, dim=-1))
-        )
-        rotations = _xyzw_to_wxyz(roma.rotmat_to_unitquat(frames @ local))
+        rotations = _xyzw_to_wxyz(roma.rotmat_to_unitquat(frames @ self._local_rotations()))
         return means, rotations, self.log_scales.exp() * size
+
+    def flatness(self) -> torch.Tensor:
+        """``(G,)`` how flat each Gaussian lies on its triangle: the cosine between its thinnest
+        axis and the triangle's normal, 1 when lying flat, 0 when standing up like a fin."""
+        thinnest = self.log_scales.argmin(dim=-1)
+        axis = self._local_rotations()[torch.arange(len(self), device=thinnest.device), :, thinnest]
+        return axis[:, 2].abs()
+
+    def _local_rotations(self) -> torch.Tensor:
+        """``(G, 3, 3)`` rotations relative to the triangles' frames."""
+        unit = torch.nn.functional.normalize(self.rotations, dim=-1)
+        return roma.unitquat_to_rotmat(_wxyz_to_xyzw(unit))
 
 
 def _wxyz_to_xyzw(q: torch.Tensor) -> torch.Tensor:

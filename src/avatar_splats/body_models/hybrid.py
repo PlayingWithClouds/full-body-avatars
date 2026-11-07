@@ -92,30 +92,60 @@ class Rig(torch.nn.Module):
         return linear_blend_skinning(rest, self.bone_indices, self.bone_weights, skinning)
 
 
-def build_avatar(
-    body: AnnyBody,
-    phenotype: np.ndarray,
-    offsets: np.ndarray,
-    head: IctFaceKit,
-    identity: np.ndarray,
-    config: BodyModelsConfig,
-) -> Avatar:
-    """Join the fitted body and head into one rigged mesh."""
+@dataclass(frozen=True)
+class HeadPlacement:
+    """The similarity transform putting the head model's vertices on the body in its rest pose."""
+
+    scale: float
+    rotation: torch.Tensor
+    """``(3, 3)``, including the change from the head model's axes to Anny's."""
+    translation: torch.Tensor
+    """``(3,)`` in metres."""
+
+    def apply(self, points: torch.Tensor) -> torch.Tensor:
+        return self.scale * points @ self.rotation.T + self.translation
+
+
+def rest_body(
+    body: AnnyBody, phenotype: np.ndarray, offsets: np.ndarray
+) -> dict[str, torch.Tensor]:
+    """The fitted body in its rest pose: ``vertices`` ``(V, 3)``, ``keypoints`` ``(17, 3)`` and
+    ``bind_poses`` ``(J, 4, 4)``."""
     device = body.faces.device
     out = body(
         torch.from_numpy(phenotype)[None].to(device),
         torch.zeros(1, body.num_bones, 3, device=device),
         torch.zeros(1, 3, device=device),
     )
-    body_rest = out["rest_vertices"][0] + torch.from_numpy(offsets).to(device)
-    keypoints = body.keypoint_regressor({"vertices": body_rest[None]})[0]
+    vertices = out["rest_vertices"][0] + torch.from_numpy(offsets).to(device)
+    return {
+        "vertices": vertices,
+        "keypoints": body.keypoint_regressor({"vertices": vertices[None]})[0],
+        "bind_poses": out["rest_bone_poses"][0],
+    }
 
+
+def rest_head(head: IctFaceKit, identity: np.ndarray) -> torch.Tensor:
+    """``(V, 3)`` the fitted head with a neutral face, in the head model's own coordinates."""
+    zeros = head.expression_basis.new_zeros(head.num_expressions)
+    return head(torch.from_numpy(identity).to(zeros.device), zeros)
+
+
+def build_avatar(
+    body: AnnyBody,
+    body_rest: dict[str, torch.Tensor],
+    head: IctFaceKit,
+    head_rest: torch.Tensor,
+    placement: HeadPlacement,
+    config: BodyModelsConfig,
+) -> Avatar:
+    """Join the fitted body and head, placed on it, into one rigged mesh."""
+    device = body.faces.device
+    bind_poses = body_rest["bind_poses"]
+    body_rest = body_rest["vertices"]
     head = head.to(device)
-    head_rest = head(
-        torch.from_numpy(identity).to(device), head.expression_basis.new_zeros(head.num_expressions)
-    )
-    scale, rotation, translation = _place_head(body, body_rest, keypoints, head, head_rest)
-    head_world = scale * head_rest @ rotation.T + translation
+    scale, rotation = placement.scale, placement.rotation
+    head_world = placement.apply(head_rest)
 
     seam = head_world[head.landmarks[ICT_CHIN], 2] - config.neck_seam
     centroids = body_rest[body.faces].mean(dim=1)
@@ -133,7 +163,7 @@ def build_avatar(
 
     k = config.max_bone_influences
     body_bones, body_weights = sparsify_weights(body.skin_weights[kept], k)
-    head_bones, head_weights = sparsify_weights(_transfer_weights(body, body_rest, head_world), k)
+    head_bones, head_weights = sparsify_weights(transfer_weights(body, body_rest, head_world), k)
 
     parts = torch.full((len(head_faces),), HEAD_SKIN, device=device)
     parts[head_faces.min(dim=1).values >= ict.MOUTH_INTERIOR.start] = MOUTH
@@ -157,26 +187,28 @@ def build_avatar(
         bone_weights=torch.cat((body_weights, head_weights)).cpu().numpy(),
         bone_labels=np.array(body.bone_labels),
         bone_parents=np.array(body.bone_parents),
-        bind_poses=out["rest_bone_poses"][0].cpu().numpy(),
+        bind_poses=bind_poses.cpu().numpy(),
         head_start=len(kept),
         expression_names=np.array(head.expression_names),
         expression_basis=expression_basis.cpu().numpy(),
     )
 
 
-def _place_head(
+def match_heads(
     body: AnnyBody,
-    body_rest: torch.Tensor,
-    keypoints: torch.Tensor,
+    body_rest: dict[str, torch.Tensor],
     head: IctFaceKit,
     head_rest: torch.Tensor,
-) -> tuple[float, torch.Tensor, torch.Tensor]:
-    """The similarity transform putting the head model on Anny's head.
+) -> HeadPlacement:
+    """Put the head model where Anny's head is: a first placement, refined against the video by
+    ``fitting.placement``.
 
     Starts from Anny's nose and eye keypoints, then matches the surfaces of the two heads down
     to the upper neck: both are bald, so their shapes compare directly, and including the neck
     makes the head sit on the body's neck at the body's angle.
     """
+    keypoints = body_rest["keypoints"]
+    body_rest = body_rest["vertices"]
     landmarks = head_rest[head.landmarks] @ ICT_TO_WORLD.to(head_rest).T
     source = torch.stack((
         landmarks[ICT_NOSE_TIP],
@@ -204,13 +236,13 @@ def _place_head(
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-    logger.info("head placed: surface distance %.1f mm", 500 * loss.item())
-    return log_scale.exp().item(), roma.rotvec_to_rotmat(rotvec).detach(), shift.detach()
+    logger.info("heads matched: surface distance %.1f mm", 500 * loss.item())
+    return HeadPlacement(
+        log_scale.exp().item(), roma.rotvec_to_rotmat(rotvec).detach(), shift.detach()
+    )
 
 
-def _transfer_weights(
-    body: AnnyBody, body_rest: torch.Tensor, points: torch.Tensor
-) -> torch.Tensor:
+def transfer_weights(body: AnnyBody, body_rest: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
     """``(P, J)`` skinning weights for points, from their nearest body vertices.
 
     Eyeballs follow Anny's eye bones, so the runtime can turn them to look around.

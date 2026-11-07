@@ -103,7 +103,16 @@ class TrainingConfig:
     offset_weight: float
     """Keeps Gaussians near their triangles."""
     scale_weight: float
-    """Keeps Gaussians from growing much beyond their triangles."""
+    max_scale: float
+    """Longest axis a Gaussian may have, in sizes of its triangle."""
+    elongation_weight: float
+    max_elongation: float
+    """How much longer a Gaussian's longest axis may be than its middle one. Training views all
+    look from eye level, where a needle pointing at the camera costs nothing; in new poses it
+    turns sideways and streaks. Thin Gaussians lying flat on the surface stay allowed."""
+    flatness_weight: float
+    """Keeps flat Gaussians lying on the surface rather than standing up like fins, which look
+    thin from the training views but streak from others."""
     learning_rates: dict[str, float]
 
 

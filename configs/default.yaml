@@ -49,7 +49,11 @@ training:
   ssim_weight: 0.2
   mask_weight: 0.1
   offset_weight: 0.01
-  scale_weight: 0.01
+  scale_weight: 1.0
+  max_scale: 2.0
+  elongation_weight: 1.0
+  max_elongation: 4.0
+  flatness_weight: 0.01
   learning_rates:
     offsets: 0.001
     rotations: 0.001

@@ -5,12 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from avatar_splats.body_models.anny import AnnyBody
-from avatar_splats.body_models.hybrid import build_avatar
+from avatar_splats.body_models.hybrid import build_avatar, match_heads, rest_body, rest_head
 from avatar_splats.body_models.ict import IctFaceKit
 from avatar_splats.config import VIDEOS, Config
 from avatar_splats.data import probe
 from avatar_splats.fitting.body import fit_body
 from avatar_splats.fitting.head import fit_heads
+from avatar_splats.fitting.placement import place_head
 from avatar_splats.preprocess import Preprocessed, preprocessed_path
 
 HEAD_VIDEOS = tuple(video for video in VIDEOS if video != "body")
@@ -40,10 +41,21 @@ def fit_capture(config: Config) -> dict[str, Path]:
         written[video] = fitted_path(config, video)
         fit.save(written[video])
 
-    identity = next(iter(head_fits.values())).identity
-    avatar = build_avatar(
-        body, body_fit.phenotype, body_fit.offsets, head, identity, config.body_models
+    head = head.to(device)
+    body_rest = rest_body(body, body_fit.phenotype, body_fit.offsets)
+    head_rest = rest_head(head, next(iter(head_fits.values())).identity)
+    placement = match_heads(body, body_rest, head, head_rest)
+    placement = place_head(
+        placement,
+        head,
+        head_rest,
+        body,
+        body_rest["vertices"],
+        body_fit,
+        preprocessed["body"],
+        config.fitting,
     )
+    avatar = build_avatar(body, body_rest, head, head_rest, placement, config.body_models)
     written["avatar"] = fitted_path(config, "avatar")
     avatar.save(written["avatar"])
     return written

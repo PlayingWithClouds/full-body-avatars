@@ -97,3 +97,13 @@ def test_runtime_reproduces_the_trained_avatar(tmp_path, avatar, gaussians):
     means, *_ = runtime.place(rest)
     expected, *_ = gaussians.place(rest, torch.from_numpy(avatar.faces))
     assert_close(means, expected)
+
+
+def test_flatness_tells_lying_from_standing_gaussians(gaussians):
+    with torch.no_grad():
+        gaussians.log_scales[:] = torch.tensor([0.0, 0.0, -3.0])  # thin along the third axis
+        gaussians.rotations[:] = torch.tensor([1.0, 0, 0, 0])  # lying flat on the triangle
+        gaussians.rotations[:10] = torch.tensor([0.7071, 0.7071, 0, 0])  # tipped up 90 degrees
+    flatness = gaussians.flatness()
+    assert_close(flatness[10:], torch.ones(40))
+    assert_close(flatness[:10], torch.zeros(10), atol=1e-4, rtol=0)
