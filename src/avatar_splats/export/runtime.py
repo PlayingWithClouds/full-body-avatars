@@ -6,7 +6,11 @@ Per frame:
    the root an offset from its bind position (root motion); the bones' world transforms follow
    down the hierarchy (``forward_kinematics``).
 2. Skinning matrices: each bone's world transform times the inverse of its bind pose.
-3. Expressions: the head's rest vertices plus the expression blendshapes, weighted.
+3. Expressions: the head's rest vertices plus the expression blendshapes, weighted. Body shapes
+   (format 5): the body's rest vertices plus ``body_shape_basis``, weighted by gravity in one
+   bone's axes (``metadata["body_shapes"]["driver"]``: the breasts' posture correctives, see
+   ``regions.gravity``), gravity being ``down`` turned by the inverse of that bone's skinning
+   rotation.
 4. Linear blend skinning of all vertices.
 5. The mesh is drawn with its two textures, filling the depth buffer.
 6. Each Gaussian is placed on its triangle (``BoundGaussians.place``): anchor point, offset,
@@ -102,6 +106,14 @@ class AvatarRuntime(torch.nn.Module):
                 expression_basis=arrays["expression_basis"],
             )
         )
+        shapes = metadata.get("body_shapes")
+        self.register_buffer("body_shape_basis", None)
+        if shapes is not None:
+            if shapes["driver"]["kind"] != "gravity":
+                raise ValueError(f"unknown body shape driver {shapes['driver']['kind']}")
+            self.register_buffer("body_shape_basis", torch.from_numpy(arrays["body_shape_basis"]))
+            self.register_buffer("body_shape_down", torch.tensor(shapes["driver"]["down"]))
+            self.body_shape_bone = self.bone_names.index(shapes["driver"]["bone"])
         self.occlusion_margin: float = metadata["occlusion_margin"]
         self.register_buffer("uvs", torch.from_numpy(arrays["uvs"]))
         self.register_buffer("face_textures", torch.from_numpy(arrays["face_textures"]).long())
@@ -137,7 +149,21 @@ class AvatarRuntime(torch.nn.Module):
     ) -> torch.Tensor:
         """``(B, V, 3)`` vertices for bone rotations, ``(B, E)`` expression weights and ``(B, 3)``
         root offsets."""
-        return self.rig(self.skinning(rotations, root_offset), expressions)
+        skinning = self.skinning(rotations, root_offset)
+        return self.rig(skinning, expressions, self.body_offsets(skinning))
+
+    def body_offsets(self, skinning: torch.Tensor) -> torch.Tensor | None:
+        """``(B, head_start, 3)`` the body shapes' offsets for ``(B, J, 4, 4)`` skinning (format
+        5), None without them: the breasts' posture correctives, weighted by gravity in the chest
+        bone's axes (``regions.gravity``)."""
+        if self.body_shape_basis is None:
+            return None
+        from avatar_splats.regions.gravity import gravity_weights
+
+        chest = skinning[:, self.body_shape_bone, :3, :3]
+        down = self.body_shape_down.to(chest)
+        gravity = (chest.transpose(1, 2) @ down[:, None])[..., 0]
+        return torch.einsum("bs,svc->bvc", gravity_weights(gravity), self.body_shape_basis)
 
     def place(self, vertices: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Means, wxyz rotations, scales, opacities and SH of the Gaussians on ``(V, 3)``."""

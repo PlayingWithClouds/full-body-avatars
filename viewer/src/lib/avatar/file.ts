@@ -42,6 +42,19 @@ export interface AvatarMetadata {
 	lighting?: LightingMetadata;
 	/** Since format 4: expression-dependent detail on the head's albedo (`wrinkle_textures`). */
 	wrinkles?: WrinkleMetadata;
+	/** Since format 5: shapes of the body's vertices (`body_shape_basis`), weighted by a pose. */
+	body_shapes?: BodyShapeMetadata;
+}
+
+export interface BodyShapeMetadata {
+	/** `(S)` names of `body_shape_basis`' shapes. */
+	names: string[];
+	/**
+	 * What weights them: `gravity`, the breasts' posture correctives. Gravity (`down`, in the
+	 * rest pose's axes) in the axes of `bone` (turned back by its skinning rotation) gives the
+	 * weights (`gravityWeights` in `rig.ts`).
+	 */
+	driver: { kind: 'gravity'; bone: string; down: [number, number, number] };
 }
 
 export interface LightingMetadata {
@@ -95,8 +108,9 @@ const MAGIC = 'AVATAR01';
 /**
  * Format 3 adds the parts and the eyes to format 2; without them the eyes show their texture.
  * Format 4 adds the learned light and wrinkle maps, and may have no Gaussians.
+ * Format 5 adds body shapes: the breasts' posture correctives.
  */
-const SUPPORTED_VERSIONS = [2, 3, 4];
+const SUPPORTED_VERSIONS = [2, 3, 4, 5];
 
 const DTYPES: Record<
 	string,

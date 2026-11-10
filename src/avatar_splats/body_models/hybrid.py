@@ -120,10 +120,18 @@ class Rig(torch.nn.Module):
             self.register_buffer(name, torch.from_numpy(getattr(avatar, name)).long())
 
     def forward(
-        self, skinning: torch.Tensor, expressions: torch.Tensor | None = None
+        self,
+        skinning: torch.Tensor,
+        expressions: torch.Tensor | None = None,
+        body_offsets: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """``(B, V, 3)`` vertices for ``(B, J, 4, 4)`` skinning and ``(B, E)`` expressions."""
+        """``(B, V, 3)`` vertices for ``(B, J, 4, 4)`` skinning, ``(B, E)`` expressions and
+        ``(B, head_start, 3)`` offsets of the body's rest vertices (body shapes)."""
         rest = self.rest_vertices.expand(len(skinning), -1, -1)
+        if body_offsets is not None:
+            rest = torch.cat(
+                (rest[:, : self.head_start] + body_offsets, rest[:, self.head_start :]), 1
+            )
         if expressions is not None:
             offsets = torch.einsum("be,evc->bvc", expressions, self.expression_basis)
             rest = torch.cat((rest[:, : self.head_start], rest[:, self.head_start :] + offsets), 1)

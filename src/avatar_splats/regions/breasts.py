@@ -81,6 +81,9 @@ class BreastRegion:
     """``(B,)`` in [0, 1]: how much each body vertex belongs to the breasts."""
     nipples: torch.Tensor
     """``(2,)`` the body vertices of her right (-x) and left (+x) nipple."""
+    tissue: torch.Tensor
+    """``(B,)`` in [0, 1]: how deep in the breast a vertex lies, as far as raising ``cupsize``
+    moves it over the most it moves any: 1 at the tip, 0 on the chest."""
 
 
 def averaging_matrix(faces: torch.Tensor, count: int) -> torch.Tensor:
@@ -137,7 +140,8 @@ def breast_region(
     nipples = torch.stack(
         [torch.where(x * side > 0, nipple, torch.zeros_like(nipple)).argmax() for side in (-1, 1)]
     )
-    return BreastRegion(kept=kept, weights=weights, nipples=nipples)
+    tissue = smooth((movement / movement.max())[:, None], matrix, smoothing)[:, 0]
+    return BreastRegion(kept=kept, weights=weights, nipples=nipples, tissue=tissue)
 
 
 def torso_faces(faces: np.ndarray, bone_indices: np.ndarray, bone_weights: np.ndarray,
@@ -242,8 +246,9 @@ class Posing:
 
     def __call__(self, rest: torch.Tensor, rotations: torch.Tensor, translations: torch.Tensor,
                  turns: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:  # fmt: skip
-        """``(N, B, 3)`` the body vertices of ``(B, 3)`` ``rest`` posed for N close-ups, in
-        their cameras' axes, and ``(N, J, 4, 4)`` the bones' transforms (rest to camera).
+        """``(N, B, 3)`` the body vertices of ``(B, 3)`` ``rest`` (or one per close-up,
+        ``(N, B, 3)``) posed for N close-ups, in their cameras' axes, and ``(N, J, 4, 4)`` the
+        bones' transforms (rest to camera).
 
         Args:
             rotations: ``(N, 3)`` the body's turn in each camera, after ``FRONT``.
@@ -257,15 +262,14 @@ class Posing:
         pose = rest.new_zeros(count, self.body.num_bones, 3)
         pose[:, bones] = turns
         skinning = self.body.skinning(self.bind_poses, pose, rest.new_zeros(count, 3))
-        posed = linear_blend_skinning(
-            rest.expand(count, -1, -1), self.bone_indices, self.bone_weights, skinning
-        )
-        centre = rest[self.nipples].mean(dim=0)
+        rest = rest.expand(count, -1, -1)
+        posed = linear_blend_skinning(rest, self.bone_indices, self.bone_weights, skinning)
+        centre = rest[:, self.nipples].mean(dim=1, keepdim=True)
         turn = roma.rotvec_to_rotmat(rotations) @ FRONT.to(rest)
         out = (posed - centre) @ turn.transpose(1, 2) + translations[:, None]
         whole = torch.eye(4, device=rest.device).repeat(count, 1, 1)
         whole[:, :3, :3] = turn
-        whole[:, :3, 3] = translations - (turn @ centre[:, None])[..., 0]
+        whole[:, :3, 3] = translations - (turn @ centre.transpose(1, 2))[..., 0]
         return out, whole[:, None] @ skinning
 
 
@@ -446,6 +450,8 @@ class BreastFit(ArrayRecord):
     """``(B, 3)`` metres added to the avatar's body vertices (those before ``head_start``)."""
     weights: np.ndarray
     """``(B,)`` the breast region (``BreastRegion.weights``)."""
+    tissue: np.ndarray
+    """``(B,)`` how deep in the breast each vertex lies (``BreastRegion.tissue``)."""
     nipples: np.ndarray
     """``(2,)`` the nipples' body vertices: hers right, left."""
     controls: np.ndarray
@@ -477,6 +483,77 @@ class BreastFit(ArrayRecord):
     """``(N,)`` mean pixels (at the render size) from the found nipples to the model's."""
 
 
+def avatar_body(arrays: dict, device: str) -> dict:
+    """The avatar file's body: ``rest`` ``(B, 3)``, ``faces`` among the body vertices, and its
+    skinning (``bind_poses``, ``bone_indices``, ``bone_weights``), as tensors on ``device``."""
+    head_start = int(arrays["head_start"])
+    faces = arrays["faces"].astype(np.int64)
+    indices = arrays["bone_indices"][:head_start].astype(np.int64)
+    return {
+        "rest": torch.from_numpy(arrays["rest_vertices"][:head_start]).float().to(device),
+        "faces": torch.from_numpy(faces[(faces < head_start).all(axis=1)]).to(device),
+        "bind_poses": torch.from_numpy(arrays["bind_poses"]).float().to(device),
+        "bone_indices": torch.from_numpy(indices).to(device),
+        "bone_weights": torch.from_numpy(arrays["bone_weights"][:head_start]).float().to(device),
+    }
+
+
+class Scene:
+    """The close-ups as the fits see them: the avatar's torso posed, drawn and compared with
+    what each shows (the losses of the module's docstring)."""
+
+    def __init__(
+        self, body, arrays: dict, bone_labels: list[str], closeups, weights: torch.Tensor,
+        nipples: torch.Tensor, size: int, device: str,
+    ):  # fmt: skip
+        b = avatar_body(arrays, device)
+        self.rest, self.faces, self.size, self.nipples = b["rest"], b["faces"], size, nipples
+        self.posing = Posing(body, b["bind_poses"], b["bone_indices"], b["bone_weights"], nipples)
+        head_start = int(arrays["head_start"])
+        drawn = torso_faces(
+            self.faces.cpu().numpy(), arrays["bone_indices"][:head_start],
+            arrays["bone_weights"][:head_start], bone_labels, head_start,
+        )  # fmt: skip
+        self.renderer = Renderer(self.faces[drawn], self.faces, weights)
+        self.target = targets(closeups, size, device)
+        self.joint_bones = [body.bone(n) for n in COCO_JOINTS.values()]
+        self.joint_heads = b["bind_poses"][self.joint_bones, :3, 3]
+
+    def losses(self, vertices: torch.Tensor, transforms: torch.Tensor, scores: bool = False):
+        """Per close-up ``outline``, ``normals``, ``nipples`` and ``joints`` of ``(N, B, 3)``
+        posed vertices and ``(N, J, 4, 4)`` bone transforms (``Posing``); with ``scores`` also
+        ``iou``, ``angle`` (degrees over the breasts) and ``nipple_pixels``."""
+        target, size = self.target, self.size
+        image = self.renderer(vertices, target.K, size)
+        outline = ((image["coverage"] - target.torso).square() * target.valid).mean((1, 2))
+        compared = target.skin * image["covered"] * (0.2 + image["region"])
+        cosine = (image["normals"] * target.normals).sum(-1)
+        normal = ((1 - cosine) * compared).sum((1, 2)) / compared.sum((1, 2)).clamp_min(1)
+        nipple = nipple_error(project(vertices[:, self.nipples], target.K), target.nipples) / size
+        heads = transforms[:, self.joint_bones, :3, :3] @ self.joint_heads[None, :, :, None]
+        heads = heads[..., 0] + transforms[:, self.joint_bones, :3, 3]
+        sure = (target.joints[..., 2] >= 0.5).float()
+        joint = ((project(heads, target.K) - target.joints[..., :2]).norm(dim=-1) * sure).sum(1)
+        out = {
+            "outline": outline, "normals": normal, "nipples": nipple,
+            "joints": joint / sure.sum(1).clamp_min(1) / size,
+        }  # fmt: skip
+        if scores:
+            hard = (image["covered"] > 0.5) & (target.valid > 0.5)
+            torso = (target.torso > 0.5) & (target.valid > 0.5)
+            on = (image["region"] > 0.5) & (target.skin > 0.5)
+            angle = torch.rad2deg(torch.acos(cosine.clamp(-1, 1)))
+            out["iou"] = (hard & torso).sum((1, 2)) / (hard | torso).sum((1, 2)).clamp_min(1)
+            out["angle"] = (angle * on).sum((1, 2)) / on.sum((1, 2)).clamp_min(1)
+            out["nipple_pixels"] = nipple * size
+        return out
+
+
+def data_loss(parts: dict, weights: dict[str, float]) -> torch.Tensor:
+    """The weighted sum of ``Scene.losses``' means."""
+    return sum(weights[k] * parts[k].mean() for k in ("outline", "normals", "nipples", "joints"))
+
+
 def fit_breasts(
     body, avatar_arrays: dict, fitted_body: np.ndarray, phenotype: np.ndarray,
     local_changes: np.ndarray, bone_labels: list[str], closeups, settings: FitSettings,
@@ -493,76 +570,34 @@ def fit_breasts(
         bone_labels: the avatar's bones.
     """
     s = settings
-    head_start = int(avatar_arrays["head_start"])
-    faces_np = avatar_arrays["faces"].astype(np.int64)
-    body_faces_np = faces_np[(faces_np < head_start).all(axis=1)]
-    rest = torch.from_numpy(avatar_arrays["rest_vertices"][:head_start]).float().to(device)
-    body_faces = torch.from_numpy(body_faces_np).to(device)
+    b = avatar_body(avatar_arrays, device)
+    rest, faces = b["rest"], b["faces"]
     region = breast_region(
-        body, phenotype, local_changes, torch.from_numpy(fitted_body).float().to(device),
-        body_faces,
+        body, phenotype, local_changes, torch.from_numpy(fitted_body).float().to(device), faces
+    )
+    scene = Scene(
+        body, avatar_arrays, bone_labels, closeups, region.weights, region.nipples,
+        s.render_size, device,
     )  # fmt: skip
-    bone_indices = avatar_arrays["bone_indices"][:head_start].astype(np.int64)
-    bone_indices = torch.from_numpy(bone_indices).to(device)
-    bone_weights = torch.from_numpy(avatar_arrays["bone_weights"][:head_start]).float().to(device)
-    bind_poses = torch.from_numpy(avatar_arrays["bind_poses"]).float().to(device)
-    drawn = torso_faces(
-        body_faces_np, avatar_arrays["bone_indices"][:head_start],
-        avatar_arrays["bone_weights"][:head_start], bone_labels, head_start,
-    )  # fmt: skip
-    renderer = Renderer(body_faces[drawn], body_faces, region.weights)
-    target = targets(closeups, s.render_size, device)
     count = len(closeups.keys)
     model = BreastModel(
-        body, region, rest, phenotype, local_changes, body_faces, count, s.smoothing_steps
+        body, region, rest, phenotype, local_changes, faces, count, s.smoothing_steps
     )
-    place_closeups(model, rest, target)
-    joint_bones = [body.bone(n) for n in COCO_JOINTS.values()]
-    joint_heads = bind_poses[joint_bones, :3, 3]
-    posing = Posing(body, bind_poses, bone_indices, bone_weights, region.nipples)
-
-    def posed(shape: torch.Tensor):
-        return posing(shape, model.rotations, model.translations, model.turns)
+    place_closeups(model, rest, scene.target)
 
     def losses(shape_on: torch.Tensor | None, scores: bool = False) -> dict:
         shaped = model.shaped()
-        vertices, transforms = posed(shaped.detach())
+        places = (model.rotations, model.translations, model.turns)
+        vertices, transforms = scene.posing(shaped.detach(), *places)
         if shape_on is not None:  # only these change the shape; the others follow it
-            vertices = torch.where(shape_on[:, None, None], posed(shaped)[0], vertices)
-        image = renderer(vertices, target.K, s.render_size)
-        outline = ((image["coverage"] - target.torso).square() * target.valid).mean((1, 2))
-        region_weight = 0.2 + image["region"]
-        compared = target.skin * image["covered"] * region_weight
-        cosine = (image["normals"] * target.normals).sum(-1)
-        normal = ((1 - cosine) * compared).sum((1, 2)) / compared.sum((1, 2)).clamp_min(1)
-        nipples = project(vertices[:, region.nipples], target.K)
-        nipple = nipple_error(nipples, target.nipples) / s.render_size
-        heads = transforms[:, joint_bones, :3, :3] @ joint_heads[None, :, :, None]
-        heads = heads[..., 0] + transforms[:, joint_bones, :3, 3]
-        sure = (target.joints[..., 2] >= 0.5).float()
-        joint = ((project(heads, target.K) - target.joints[..., :2]).norm(dim=-1) * sure).sum(1)
-        joint = joint / sure.sum(1).clamp_min(1) / s.render_size
-        out = {
-            "outline": outline, "normals": normal, "nipples": nipple, "joints": joint,
-            "pose": model.turns.square().sum((1, 2)),
-        }  # fmt: skip
-        if scores:
-            inside = image["region"] > 0.5
-            hard = (image["covered"] > 0.5) & (target.valid > 0.5)
-            torso = (target.torso > 0.5) & (target.valid > 0.5)
-            iou = (hard & torso).sum((1, 2)) / (hard | torso).sum((1, 2)).clamp_min(1)
-            on = inside & (target.skin > 0.5)
-            angle = torch.rad2deg(torch.acos(cosine.clamp(-1, 1)))
-            out["iou"] = iou
-            out["angle"] = (angle * on).sum((1, 2)) / on.sum((1, 2)).clamp_min(1)
-            out["nipple_pixels"] = nipple * s.render_size
-        return out
+            vertices = torch.where(
+                shape_on[:, None, None], scene.posing(shaped, *places)[0], vertices
+            )
+        return scene.losses(vertices, transforms, scores)
 
     def total(parts: dict, shaping: bool) -> torch.Tensor:
         w = s.weights
-        value = sum(
-            w[k] * parts[k].mean() for k in ("outline", "normals", "nipples", "joints", "pose")
-        )
+        value = data_loss(parts, w) + w["pose"] * model.turns.square().sum((1, 2)).mean()
         if shaping:
             value = value + w["offsets"] * model.offsets().div(MILLIMETRE).square().sum(1).mean()
             value = value + w["controls"] * model.controls.square().sum()
@@ -579,7 +614,7 @@ def fit_breasts(
     run(s.pose_steps, pose, None, "placing")
     with torch.no_grad():
         before = losses(None, scores=True)
-    tilt, gravity = tilt_and_gravity(posing, rest, model)
+    tilt, gravity = tilt_and_gravity(scene.posing, rest, model)
     identity = np.nan_to_num(closeups.identity, nan=-1.0)
     placed = before["iou"].cpu().numpy() >= s.min_iou
     shaping = (tilt <= s.max_tilt) & (identity >= s.min_identity) & placed
@@ -587,7 +622,7 @@ def fit_breasts(
     run(s.shape_steps, [*pose, model.controls, model.offset_values], shape_on, "shaping")
     with torch.no_grad():
         after = losses(None, scores=True)
-        tilt, gravity = tilt_and_gravity(posing, rest, model)
+        tilt, gravity = tilt_and_gravity(scene.posing, rest, model)
         p, c = model.control_values(model.controls)
         p0, c0 = model.control_values(torch.zeros_like(model.controls))
 
@@ -599,8 +634,8 @@ def fit_breasts(
 
     return BreastFit(
         change=numpy(model.change()), weights=numpy(region.weights),
-        nipples=numpy(region.nipples), controls=numpy(picked(p, c)),
-        controls_before=numpy(picked(p0, c0)), keys=closeups.keys,
+        tissue=numpy(region.tissue), nipples=numpy(region.nipples),
+        controls=numpy(picked(p, c)), controls_before=numpy(picked(p0, c0)), keys=closeups.keys,
         rotations=numpy(model.rotations), translations=numpy(model.translations),
         turns=numpy(model.turns), tilt=tilt, gravity=gravity, shaping=shaping,
         iou_before=numpy(before["iou"]), iou_after=numpy(after["iou"]),
@@ -609,54 +644,36 @@ def fit_breasts(
     )  # fmt: skip
 
 
-def avatar_body(arrays: dict, device: str) -> dict:
-    """The avatar file's body: ``rest`` ``(B, 3)``, ``faces`` among the body vertices, and its
-    skinning (``bind_poses``, ``bone_indices``, ``bone_weights``), as tensors on ``device``."""
-    head_start = int(arrays["head_start"])
-    faces = arrays["faces"].astype(np.int64)
-    return {
-        "rest": torch.from_numpy(arrays["rest_vertices"][:head_start]).float().to(device),
-        "faces": torch.from_numpy(faces[(faces < head_start).all(axis=1)]).to(device),
-        "bind_poses": torch.from_numpy(arrays["bind_poses"]).float().to(device),
-        "bone_indices": torch.from_numpy(arrays["bone_indices"][:head_start].astype(np.int64)).to(
-            device
-        ),
-        "bone_weights": torch.from_numpy(arrays["bone_weights"][:head_start]).float().to(device),
-    }
-
-
 @torch.no_grad()
 def render_closeups(
     body, arrays: dict, bone_labels: list[str], fit: BreastFit, closeups, size: int,
-    changed: bool, device: str,
+    shapes: torch.Tensor | np.ndarray | None, device: str,
 ) -> dict[str, np.ndarray]:  # fmt: skip
-    """The torso as ``fit`` placed it in each close-up, with the avatar's breasts or (``changed``)
-    the fitted ones: ``coverage`` ``(N, S, S)``, ``normals`` ``(N, S, S, 3)`` in the camera's
-    axes, ``region`` ``(N, S, S)`` the breasts' weight, and ``nipples`` ``(N, 2, 2)`` pixels."""
-    b = avatar_body(arrays, device)
-    rest = b["rest"] + (torch.from_numpy(fit.change).to(device) if changed else 0)
-    nipples = torch.from_numpy(fit.nipples).long().to(device)
-    posing = Posing(body, b["bind_poses"], b["bone_indices"], b["bone_weights"], nipples)
-    head_start = int(arrays["head_start"])
-    drawn = torso_faces(
-        b["faces"].cpu().numpy(), arrays["bone_indices"][:head_start],
-        arrays["bone_weights"][:head_start], bone_labels, head_start,
-    )  # fmt: skip
+    """The torso as ``fit`` placed it in each close-up, its body vertices moved by ``shapes``
+    (``(B, 3)`` or per close-up ``(N, B, 3)`` metres; None: the avatar's): ``coverage``
+    ``(N, S, S)``, ``normals`` ``(N, S, S, 3)`` in the camera's axes, ``region`` ``(N, S, S)`` the
+    breasts' weight, and ``nipples`` ``(N, 2, 2)`` pixels."""
     weights = torch.from_numpy(fit.weights).to(device)
-    renderer = Renderer(b["faces"][drawn], b["faces"], weights)
-    K = torch.from_numpy(closeups.K).float().to(device).clone()
-    K[:, :2] *= size / closeups.images.shape[1]
+    nipples = torch.from_numpy(fit.nipples).long().to(device)
+    scene = Scene(body, arrays, bone_labels, closeups, weights, nipples, size, device)
+    if shapes is None:
+        shapes = torch.zeros_like(scene.rest)
+    shapes = torch.as_tensor(shapes, device=device).float()
+    if shapes.ndim == 2:
+        shapes = shapes.expand(len(fit.keys), -1, -1)
     out = {"coverage": [], "normals": [], "region": [], "nipples": []}
-    for start in range(0, len(K), 16):
+    for start in range(0, len(fit.keys), 16):
         part = slice(start, start + 16)
-        vertices, _ = posing(
-            rest, *(torch.from_numpy(getattr(fit, k)[part]).to(device)
-                    for k in ("rotations", "translations", "turns")),
-        )  # fmt: skip
-        image = renderer(vertices, K[part], size)
+        places = [torch.from_numpy(getattr(fit, k)[part]).to(device)
+                  for k in ("rotations", "translations", "turns")]  # fmt: skip
+        vertices = torch.cat([
+            scene.posing(scene.rest + shape, *(p[k : k + 1] for p in places))[0]
+            for k, shape in enumerate(shapes[part])
+        ])  # fmt: skip
+        image = scene.renderer(vertices, scene.target.K[part], size)
         for key in ("coverage", "normals", "region"):
             out[key].append(image[key].cpu().numpy())
-        out["nipples"].append(project(vertices[:, nipples], K[part]).cpu().numpy())
+        out["nipples"].append(project(vertices[:, nipples], scene.target.K[part]).cpu().numpy())
     return {key: np.concatenate(values) for key, values in out.items()}
 
 
@@ -675,3 +692,27 @@ def with_breasts(file, fit: BreastFit):
         "nipples": [int(v) for v in fit.nipples],
     }
     return AvatarFile(metadata, dict(file.arrays, rest_vertices=rest))
+
+
+@torch.no_grad()
+def portraits(
+    vertices: torch.Tensor, faces: torch.Tensor, nipples: torch.Tensor, yaws: list[float],
+    size: int = 384, distance: float = 0.9, fov_degrees: float = 30.0,
+) -> np.ndarray:  # fmt: skip
+    """``(Y, size, size)`` grey images of body vertices in their rest-pose axes, lit from the
+    camera's upper left, by a camera ``distance`` metres from the nipples' middle at each yaw
+    (degrees about z: 0 in front of her, 90 at her left)."""
+    device = vertices.device
+    renderer = Renderer(faces, faces, torch.zeros(len(vertices), device=device))
+    focal = size / 2 / math.tan(math.radians(fov_degrees) / 2)
+    K = torch.tensor([[focal, 0, size / 2], [0, focal, size / 2], [0, 0, 1]], device=device)
+    centre = vertices[nipples].mean(dim=0)
+    out = []
+    for yaw in yaws:
+        turn = roma.rotvec_to_rotmat(torch.tensor([0.0, 0.0, -math.radians(yaw)], device=device))
+        axes = FRONT.to(vertices) @ turn
+        placed = (vertices - centre) @ axes.T + torch.tensor([0.0, 0.0, distance], device=device)
+        image = renderer(placed[None], K[None], size)
+        light = (image["normals"][0] @ torch.tensor([0.3, -0.4, -0.85], device=device)).clamp(0, 1)
+        out.append((light * image["coverage"][0]).cpu().numpy())
+    return np.stack(out)

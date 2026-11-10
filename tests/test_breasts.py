@@ -97,7 +97,7 @@ def test_with_breasts_moves_the_body_only():
     count = len(BREAST_PHENOTYPES) + len(BREAST_CHANGES)
     empty = np.zeros(0)
     fit = BreastFit(
-        change=change, weights=np.ones(4), nipples=np.array([0, 1]),
+        change=change, weights=np.ones(4), tissue=np.ones(4), nipples=np.array([0, 1]),
         controls=np.linspace(0, 1, count), controls_before=np.zeros(count), keys=empty,
         rotations=empty, translations=empty, turns=empty, tilt=empty, gravity=empty,
         shaping=empty, iou_before=empty, iou_after=empty, normal_before=empty,

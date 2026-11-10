@@ -1,6 +1,7 @@
 /**
  * Posing the avatar's mesh, as `avatar_splats.export.runtime` does: expression blendshapes on
- * the head's rest vertices, forward kinematics of bind-relative bone rotations, then linear blend
+ * the head's rest vertices, body shapes weighted by the pose on the body's (format 5: the breasts'
+ * posture correctives), forward kinematics of bind-relative bone rotations, then linear blend
  * skinning.
  */
 
@@ -13,6 +14,33 @@ import {
 	type Mat4,
 	type Vec3
 } from '#lib/math.ts';
+
+/** Gravity in the chest's axes when the avatar stands upright, as `regions/gravity.py`'s DOWN. */
+const UPRIGHT: Vec3 = [0, 0, -1];
+
+/**
+ * The posture correctives' weights (forward, back, left, right, lift; `regions/gravity.py`) for
+ * unit gravity in the chest bone's axes.
+ */
+export function gravityWeights(gravity: Vec3): number[] {
+	const dx = gravity[0] - UPRIGHT[0];
+	const dy = gravity[1] - UPRIGHT[1];
+	const dz = gravity[2] - UPRIGHT[2];
+	return [Math.max(-dy, 0), Math.max(dy, 0), Math.max(dx, 0), Math.max(-dx, 0), dz];
+}
+
+/**
+ * Gravity (`down`, in the rest pose's axes) in the axes of a bone whose skinning matrix (row-major
+ * 4x4, or its top three rows) is `m`: its rotation transposed, applied to `down`.
+ */
+export function gravityInBone(m: ArrayLike<number>, down: Vec3): Vec3 {
+	const g: Vec3 = [0, 0, 0];
+	for (let a = 0; a < 3; a++) {
+		g[a] = m[a] * down[0] + m[4 + a] * down[1] + m[8 + a] * down[2];
+	}
+	const length = Math.hypot(...g) || 1;
+	return [g[0] / length, g[1] / length, g[2] / length];
+}
 
 export class Rig {
 	readonly boneNames: string[];
@@ -29,6 +57,12 @@ export class Rig {
 	private readonly relative: Mat4[];
 	private readonly headStart: number;
 	private readonly expressionBasis: Float32Array;
+	/** `(S * headStart * 3)` the body shapes, or none before format 5. */
+	private readonly bodyShapeBasis: Float32Array | null;
+	private readonly bodyShapeBone: number;
+	private readonly bodyShapeDown: Vec3;
+	/** The body shapes' weights in the last pose. */
+	bodyShapeWeights: number[] = [];
 	private readonly posed: Float32Array;
 	/** The rest vertices with the current expressions, reused between poses. */
 	private readonly shaped: Float32Array;
@@ -49,6 +83,13 @@ export class Rig {
 		this.boneWeights = array<Float32Array>(file, 'bone_weights').data;
 		this.parents = array<Int32Array>(file, 'bone_parents').data;
 		this.expressionBasis = array<Float32Array>(file, 'expression_basis').data;
+		const shapes = file.metadata.body_shapes;
+		if (shapes && shapes.driver.kind !== 'gravity') {
+			throw new Error(`unknown body shape driver ${shapes.driver.kind}`);
+		}
+		this.bodyShapeBasis = shapes ? array<Float32Array>(file, 'body_shape_basis').data : null;
+		this.bodyShapeBone = shapes ? this.boneNames.indexOf(shapes.driver.bone) : -1;
+		this.bodyShapeDown = shapes ? shapes.driver.down : [0, 0, -1];
 
 		const bind = array<Float32Array>(file, 'bind_poses').data;
 		this.bindPoses = this.boneNames.map((_, j) =>
@@ -135,6 +176,25 @@ export class Rig {
 	}
 
 	/**
+	 * The body's rest vertices plus the body shapes weighted for this pose (`matrices`: the
+	 * skinning matrices' top rows), into `shaped`; nothing without body shapes.
+	 */
+	private shapeBody(matrices: Float64Array): void {
+		const basis = this.bodyShapeBasis;
+		if (!basis) return;
+		const body = 3 * this.headStart;
+		const shaped = this.shaped;
+		shaped.set(this.rest.subarray(0, body), 0);
+		const chest = matrices.subarray(12 * this.bodyShapeBone, 12 * this.bodyShapeBone + 12);
+		this.bodyShapeWeights = gravityWeights(gravityInBone(chest, this.bodyShapeDown));
+		this.bodyShapeWeights.forEach((weight, s) => {
+			if (Math.abs(weight) < 1e-3) return;
+			const offset = s * body;
+			for (let i = 0; i < body; i++) shaped[i] += weight * basis[offset + i];
+		});
+	}
+
+	/**
 	 * `(V * 3)` posed vertices for bind-relative rotations, expression weights and the root's
 	 * offset; the returned array is reused by the next call. Also sets `boneWorld`.
 	 */
@@ -154,6 +214,7 @@ export class Rig {
 		const head = 3 * this.headStart;
 		const headValues = shaped.length - head;
 		shaped.set(this.rest.subarray(head), head);
+		this.shapeBody(matrices);
 		const basis = this.expressionBasis;
 		for (let e = 0; e < expressions.length; e++) {
 			const weight = expressions[e];
