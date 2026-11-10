@@ -45,6 +45,11 @@ All stages run end to end (`go-task pipeline`); the README explains each. Output
 `outputs/preprocess/<video>.npz`, `outputs/fitting/{body,head_static,head_expressions,avatar}.npz`,
 `outputs/training/{gaussians,textures,colours,evaluation}.npz`, `outputs/export/performer.avatar`;
 the faces stage, `outputs/faces/<head video>.{npz,faces.json,faces.jpg}` (the avatar's face per frame from the video's calibrated MediaPipe blendshapes, refined on the 468 mesh landmarks, with the video's crops: `go-task faces`; the viewer shows it as a grid of heads beside the avatar, `?faces=`); the motion stage, run on any video, `outputs/motion/<name>/{observations,fit,clip}.npz`.
+The regions stage (notebook 15, `regions/`) refines the breasts of an avatar notebook 12 built,
+from close-ups notebook 14 harvested (`preprocess/regions.py`: an NSFW detector loaded from
+converted weights in `assets/nsfw/`, never from its pickle): shape, posture correctives, their own
+texture, a finer mesh with the nipples' relief; `outputs/regions/<name>/*.npz` and
+`outputs/export/<name>-regions.avatar`.
 
 Conventions every stage relies on:
 
@@ -111,7 +116,9 @@ ICT-FaceKit's lash cards, brows where the baked texture shows them), drawn by
 `lib/render/face_hair.ts`. The inside of the mouth (teeth, gums, tongue, socket, the lips' inner
 side) is drawn with stock materials by region (`export/mouth.py`, `lib/render/mouth.ts`), and
 `jawOpen` brings the lower teeth up and forward so they show over her full lower lip.
-Format 4 files may have no Gaussians (the mesh alone), and may carry a learned light
+Format 5 adds body shapes (`body_shape_basis`, `metadata.body_shapes`): the breasts' posture
+correctives, weighted in `Rig.pose` by gravity in the chest bone's axes; files may also carry a
+third texture, `breast_texture`. Format 4 files may have no Gaussians (the mesh alone), and may carry a learned light
 (`metadata.lighting`, 9 RGB spherical-harmonic coefficients over world-axis normals; the skin
 textures then hold albedo) and wrinkle maps (`metadata.wrinkles`, `wrinkle_textures`: signed albedo
 detail on the head texture, weighted by expressions); `lib/render/skin.ts` draws both, the light

@@ -91,6 +91,17 @@ def crop_intrinsics(K: np.ndarray, crop: np.ndarray, size: int) -> np.ndarray:
     return out
 
 
+def frame_intrinsics(closeups: Closeups, i: int) -> np.ndarray:
+    """``(3, 3)`` the source frame's intrinsics of close-up ``i``, from its crop's."""
+    crop, K = closeups.crops[i], closeups.K[i].astype(np.float64)
+    scale = (crop[2] - crop[0]) / closeups.images.shape[1]
+    out = K.copy()
+    out[:2] *= scale
+    out[0, 2] += crop[0]
+    out[1, 2] += crop[1]
+    return out
+
+
 def square_crop(box: np.ndarray, span: float) -> np.ndarray:
     """``(4,)`` a square ``span`` times ``box``'s larger side, around its centre."""
     centre = (box[:2] + box[2:4]) / 2

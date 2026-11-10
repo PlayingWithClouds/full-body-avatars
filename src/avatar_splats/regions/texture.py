@@ -211,7 +211,7 @@ def bake_breasts(
     from avatar_splats.data.video import read_frames
     from avatar_splats.preprocess.prepare import PART_NAMES
     from avatar_splats.regions.breasts import Scene
-    from avatar_splats.regions.closeups import crop_intrinsics, cut
+    from avatar_splats.regions.closeups import crop_intrinsics, cut, frame_intrinsics
 
     s = settings
     head_start = int(arrays["head_start"])
@@ -259,7 +259,7 @@ def bake_breasts(
                                  start=int(closeups.frames[i])))  # fmt: skip
         side = int(min(s.crop_size, round(crop[2] - crop[0])))
         image = torch.from_numpy(cut(frame, crop, side)).float().to(device).permute(2, 0, 1) / 255
-        K = crop_intrinsics(_frame_K(closeups, i), crop, side)
+        K = crop_intrinsics(frame_intrinsics(closeups, i), crop, side)
         K = torch.from_numpy(K).float().to(device)
         vertices, _ = scene.posing(
             rest + shapes[i], *(torch.from_numpy(getattr(places, k)[i : i + 1]).float().to(device)
@@ -340,17 +340,6 @@ def robust_mean(samples, count: int, steps: int, scale: float, device: str):
             total.index_add_(0, texels, weights)
         mean = sums / total.clamp_min(1e-12)[:, None]
     return mean, total
-
-
-def _frame_K(closeups, i: int) -> np.ndarray:
-    """The frame's intrinsics of close-up ``i``, from its crop's."""
-    crop, K = closeups.crops[i], closeups.K[i].astype(np.float64)
-    scale = (crop[2] - crop[0]) / closeups.images.shape[1]
-    out = K.copy()
-    out[:2] *= scale
-    out[0, 2] += crop[0]
-    out[1, 2] += crop[1]
-    return out
 
 
 def sh_basis(normals: torch.Tensor) -> torch.Tensor:
