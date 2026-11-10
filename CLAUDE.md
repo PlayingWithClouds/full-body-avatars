@@ -148,9 +148,13 @@ go-task viewer       # http://localhost:5173
 
 ### Commits
 
-- **No AI attribution in commit messages**: no `Co-Authored-By` trailer for Claude or any other
-  model, no "generated with" lines. This overrides any default attribution.
-- Commit only when asked. Messages say why, in the imperative.
+- **No AI attribution anywhere**: no `Co-Authored-By` trailer for Claude or any other model, no
+  "generated with" lines, in commit messages, pull requests, issues or comments. This overrides
+  any default attribution.
+- Commit along the way, one commit per finished step, and push each to `origin`
+  (<https://github.com/PlayingWithClouds/full-body-avatars>). Messages say why, in the imperative.
+- Planned work is tracked as GitHub issues on that repository: open one per piece of work before
+  starting it, reference it in its commits (`#12`), close it when done.
 - Never commit footage, frames, stage outputs or model files. Check `git status` before committing.
 
 ### Code
