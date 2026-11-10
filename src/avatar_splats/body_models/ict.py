@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import roma
 import torch
 
 from avatar_splats.body_models.mesh import read_obj, read_obj_uvs, read_obj_vertices
@@ -32,6 +33,10 @@ MOUTH_INTERIOR = slice(11248, 21451)
 EYEBALLS = slice(21451, 24591)
 LEFT_EYEBALL = slice(21451, 23021)
 RIGHT_EYEBALL = slice(23021, 24591)
+"""ICT-FaceKit's names; which one is on the head's left (+x) is read from the mesh."""
+
+EYEBALL_ORDER = (LEFT_EYEBALL, RIGHT_EYEBALL)
+"""The order of per-eye values such as eye rotations."""
 
 UV_TILES = 5
 """Tiles side by side in the head's texture atlas. ICT-FaceKit lays its UVs out in four tiles
@@ -62,7 +67,7 @@ class IctFaceKit(torch.nn.Module):
     def __init__(self, directory: str | Path, num_identities: int = 100):
         super().__init__()
         model = Path(directory) / "FaceXModel"
-        config = json.loads((model / "vertex_indices.json").read_text())
+        config = _vertex_indices(directory)
 
         neutral, faces = read_obj(model / "generic_neutral_mesh.obj")
         neutral = neutral[:NUM_KEPT_VERTICES]
@@ -86,7 +91,14 @@ class IctFaceKit(torch.nn.Module):
             "identity_basis", basis([f"identity{i:03d}" for i in range(num_identities)])
         )
         self.register_buffer("expression_basis", basis(self.expression_names))
-        self.register_buffer("landmarks", torch.tensor(config["idx_to_landmark_verts"]))
+        self.register_buffer("landmarks", torch.tensor(landmark_vertices(directory)))
+
+    def pupils(self) -> torch.Tensor:
+        """``(2,)`` the vertex at the middle of each eyeball's pupil (its frontmost), in the order
+        of ``LEFT_EYEBALL``, ``RIGHT_EYEBALL``."""
+        return torch.tensor(
+            [eyeball.start + int(self.neutral[eyeball, 2].argmax()) for eyeball in EYEBALL_ORDER]
+        )
 
     @property
     def num_identities(self) -> int:
@@ -103,3 +115,52 @@ class IctFaceKit(torch.nn.Module):
             + torch.einsum("...i,ivc->...vc", identity, self.identity_basis)
             + torch.einsum("...e,evc->...vc", expression, self.expression_basis)
         )
+
+
+def turn_eyes(vertices: torch.Tensor, rotations: torch.Tensor) -> torch.Tensor:
+    """``(..., V, 3)`` head model vertices with each eyeball turned about its centre.
+
+    Args:
+        vertices: ``(..., V, 3)`` vertices in the head model's axes.
+        rotations: ``(..., 2, 3)`` rotation vectors in the head model's axes, in
+            ``EYEBALL_ORDER``; zero looks straight ahead.
+    """
+    turned = [vertices[..., : EYEBALLS.start, :]]
+    for eye, eyeball in enumerate(EYEBALL_ORDER):
+        points = vertices[..., eyeball, :]
+        centre = points.mean(dim=-2, keepdim=True)
+        matrix = roma.rotvec_to_rotmat(rotations[..., eye, :])
+        turned.append((points - centre) @ matrix.transpose(-1, -2) + centre)
+    return torch.cat(turned, dim=-2)
+
+
+def all_vertices(directory: str | Path, identity: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Every vertex of the model with an identity and a neutral face, the Unreal helper meshes
+    (``LASH_CARDS`` among them) included, and all its triangles.
+
+    Args:
+        identity: ``(I,)`` identity weights, as fitted.
+
+    Returns:
+        ``(V, 3)`` vertices in metres in the model's axes, and ``(F, 3)`` triangles.
+    """
+    model = Path(directory) / "FaceXModel"
+    neutral, faces = read_obj(model / "generic_neutral_mesh.obj")
+    vertices = neutral.astype(np.float64)
+    for i, weight in enumerate(identity):
+        vertices += weight * (read_obj_vertices(model / f"identity{i:03d}.obj") - neutral)
+    return vertices * CENTIMETRE, faces
+
+
+LASH_CARDS = slice(25351, 26719)
+"""The eyelash strips: three layered cards along each lid, each a grid of 19 columns along the
+lid by 6 rows from the lashes' roots to their tips."""
+
+
+def landmark_vertices(directory: str | Path) -> list[int]:
+    """The 68 vertex indices of the Multi-PIE facial landmarks, read without loading the model."""
+    return _vertex_indices(directory)["idx_to_landmark_verts"]
+
+
+def _vertex_indices(directory: str | Path) -> dict:
+    return json.loads((Path(directory) / "FaceXModel" / "vertex_indices.json").read_text())

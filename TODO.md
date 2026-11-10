@@ -1,5 +1,31 @@
 # Open items
 
+## Plan: a pure mesh avatar
+
+Decided 2026-11-08. Gaussians add little over the textured mesh (held-out PSNR on the performer:
++1.2 dB body, +1.1 dB head turntable, +2.9 dB expressions) and every fix so far has constrained
+them into a texture. The performer is bald, the videos are generated and seen from one eye-level
+orbit, so the detail they can teach fits a mesh: body and head become a skinned, textured mesh
+only, with expression-dependent detail on the face. Gaussians stay in the code until the mesh
+matches them, then go.
+
+1. **Sharper baking** (in progress). Each frame split into broad colour, averaged over many
+   frames (no exposure patches), and fine detail from the frames that see a place most squarely
+   (`training/textures.py`). Check: mesh-only held-out PSNR (was 17.3 / 19.2 / 18.4 dB), the
+   texture's patches, and that `view_spread` of the mesh stays near 0.
+2. **More triangles.** Subdivide the joined mesh (65k triangles to 260k or more) in
+   `body_models`, carrying UVs, skin weights, parts and the head's expression blendshapes along;
+   new head vertices stay after `head_start`. Then a smooth displacement on the denser mesh,
+   fitted to the now aligned frames, with a strong smoothness prior: the old displacement hid pose
+   errors.
+3. **Expression detail.** What Gaussians gave the face under expressions (wrinkles, mouth inside,
+   teeth): wrinkle textures blended by expression weights, as games do, baked from the
+   expression video's frames by expression.
+4. **Training without Gaussians.** Pose and colour corrections refined against the textured
+   mesh alone; export and viewer without Gaussians.
+
+## Other open items
+
 Noted 2026-11-08, to pick up in a later session. Check each against the code first.
 
 1. **Neck seam in the head videos.** Head videos are compared above the fitted chin

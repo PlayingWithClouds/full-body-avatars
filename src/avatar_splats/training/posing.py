@@ -57,6 +57,7 @@ class _HeadVideo(torch.nn.Module):
         self.register_buffer("rotations", _tensor(fit.rotations))
         self.register_buffer("translations", _tensor(fit.translations))
         self.register_buffer("expressions", _tensor(fit.expressions))
+        self.register_buffer("eye_rotations", _tensor(fit.eye_rotations))
         self.frames = torch.nn.ModuleList(
             _Corrections((3,), fit.expressions.shape[1]) for _ in range(len(fit.rotations))
         )
@@ -101,15 +102,14 @@ class Posing(torch.nn.Module):
     def vertices(self, video: str, index: int) -> torch.Tensor:
         """``(V, 3)`` the avatar's vertices in frame ``index`` of ``video``, corrections included.
 
-        For head videos only the head's vertices are meaningful; the body's are zero.
+        For head videos only the head's vertices are meaningful; the others are zero.
         """
         if video == "body":
             correction = self.body_frames[index]
             rotations = self.body_rotations[index] + correction.rotation * self.posed
             translation = self.body_translations[index] + correction.translation
-            skinning = self.body(
-                self.phenotype, self.local_changes, rotations[None], translation[None]
-            )["skinning"]
+            # The avatar's bind poses are the fitted body's rest skeleton.
+            skinning = self.body.skinning(self.rig.bind_poses, rotations[None], translation[None])
             expression = correction.expression.clamp(0, 1)
             return self.rig(skinning, expression[None])[0]
 
@@ -119,11 +119,13 @@ class Posing(torch.nn.Module):
             self.head,
             self.identity,
             (head.expressions[index] + correction.expression).clamp(0, 1)[None],
+            head.eye_rotations[index][None],
             (head.rotations[index] + correction.rotation)[None],
             (head.translations[index] + correction.translation)[None],
             self.centre,
         )[0]
-        return torch.cat((heads.new_zeros(self.head_start, 3), heads))
+        after = len(self.rig.rest_vertices) - self.head_start - len(heads)
+        return torch.cat((heads.new_zeros(self.head_start, 3), heads, heads.new_zeros(after, 3)))
 
     def prior(self, video: str, index: int) -> torch.Tensor:
         """How far the corrections take frame ``index`` of ``video`` from its fit."""

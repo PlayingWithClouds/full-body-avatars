@@ -131,3 +131,22 @@ class AnnyBody(torch.nn.Module):
         output["keypoints"] = self.keypoint_regressor(output)
         output["skinning"] = output["bone_poses"] @ torch.linalg.inv(output["rest_bone_poses"])
         return output
+
+    def skinning(
+        self, rest_bone_poses: torch.Tensor, rotations: torch.Tensor, translation: torch.Tensor
+    ) -> torch.Tensor:
+        """``(B, J, 4, 4)`` the skinning matrices of ``forward``, for a shape already known.
+
+        Fitting motion to one fixed shape needs only the bones: this skips rebuilding the rest
+        mesh from the phenotype and skinning every vertex with every bone.
+
+        Args:
+            rest_bone_poses: ``(J, 4, 4)`` from ``forward``'s ``rest_bone_poses``.
+            rotations: ``(B, J, 3)`` rotation vectors; ``translation``: ``(B, 3)``.
+        """
+        pose = torch.eye(4, device=rotations.device).repeat(*rotations.shape[:2], 1, 1)
+        pose[..., :3, :3] = roma.rotvec_to_rotmat(rotations)
+        pose[:, 0, :3, 3] = translation
+        rest = rest_bone_poses.expand(len(rotations), -1, -1, -1)
+        _, bone_poses = self.model.get_bone_transforms(pose, rest)
+        return bone_poses @ torch.linalg.inv(rest_bone_poses)

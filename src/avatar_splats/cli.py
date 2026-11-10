@@ -25,6 +25,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.add_parser("fit", help="fit the body and head models and build the avatar's mesh")
     commands.add_parser("train", help="train the avatar's Gaussians")
     commands.add_parser("export", help="write the avatar file for the game runtime")
+    faces_parser = commands.add_parser(
+        "faces", help="convert a video's face landmarks to the avatar's face, per frame"
+    )
+    faces_parser.add_argument(
+        "videos",
+        nargs="*",
+        choices=[video for video in VIDEOS if video != "body"],
+        help="head videos to convert (default: head_expressions)",
+    )
+    motion_parser = commands.add_parser(
+        "motion", help="extract the motion of the people in a video as a clip for the avatar"
+    )
+    motion_parser.add_argument("video", type=Path, help="video of one or more people moving")
+    motion_parser.add_argument("--name", help="name of the results (default: the video's)")
+    motion_parser.add_argument(
+        "--refit", action="store_true", help="fit again from the observations of an earlier run"
+    )
 
     args = parser.parse_args(argv)
     config = load_config(args.config)
@@ -49,6 +66,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         from avatar_splats.export import export_capture
 
         return report({"avatar": export_capture(config)})
+    if args.command == "faces":
+        from avatar_splats.faces import convert_video
+
+        written = {}
+        for video in args.videos or ["head_expressions"]:
+            written |= {f"{video} {k}": path for k, path in convert_video(config, video).items()}
+        return report(written)
+    if args.command == "motion":
+        from avatar_splats.motion import extract_motion
+
+        return report(extract_motion(config, args.video, args.name or args.video.stem, args.refit))
     raise AssertionError(f"unhandled command {args.command}")
 
 

@@ -68,8 +68,8 @@ def head_views(
 
     with torch.no_grad():
         heads = head_vertices(
-            head, tensor(fit.identity)[None], tensor(fit.expressions), tensor(fit.rotations),
-            tensor(fit.translations), tensor(fit.centre),
+            head, tensor(fit.identity)[None], tensor(fit.expressions), tensor(fit.eye_rotations),
+            tensor(fit.rotations), tensor(fit.translations), tensor(fit.centre),
         )  # fmt: skip
     camera = _scaled_camera(fit.camera(), resolution).to(device)
     chins = camera.project(heads[:, head.landmarks[CHIN]])[:, 1]

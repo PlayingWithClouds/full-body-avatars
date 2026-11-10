@@ -65,3 +65,45 @@ export function normalize(v: Vec3): Vec3 {
 	const length = Math.hypot(v[0], v[1], v[2]) || 1;
 	return [v[0] / length, v[1] / length, v[2] / length];
 }
+
+export function multiply3(a: ArrayLike<number>, b: ArrayLike<number>): Mat3 {
+	const out = new Float64Array(9);
+	for (let i = 0; i < 3; i++) {
+		for (let j = 0; j < 3; j++) {
+			out[3 * i + j] = a[3 * i] * b[j] + a[3 * i + 1] * b[3 + j] + a[3 * i + 2] * b[6 + j];
+		}
+	}
+	return out;
+}
+
+export function transpose3(m: ArrayLike<number>): Mat3 {
+	return Float64Array.of(m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]);
+}
+
+/** The rotation part of a row-major 4x4 transform. */
+export function rotation3(m: Mat4): Mat3 {
+	return Float64Array.of(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
+}
+
+export function apply3(m: ArrayLike<number>, v: Vec3): Vec3 {
+	return [
+		m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+		m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+		m[6] * v[0] + m[7] * v[1] + m[8] * v[2]
+	];
+}
+
+/**
+ * The direction a row-major 3x3 world rotation turns the avatar's front (-y) to, as an angle
+ * about world z.
+ */
+export function heading(m: ArrayLike<number>): number {
+	return Math.atan2(-m[4], -m[1]);
+}
+
+/** Rotation about world z, row-major 3x3. */
+export function yawMatrix(angle: number): Mat3 {
+	const c = Math.cos(angle);
+	const s = Math.sin(angle);
+	return Float64Array.of(c, -s, 0, s, c, 0, 0, 0, 1);
+}

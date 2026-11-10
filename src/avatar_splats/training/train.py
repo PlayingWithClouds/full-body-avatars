@@ -261,8 +261,7 @@ def train(
     generator = random.Random(0)
     for step in range(config.iterations):
         if step and not step % config.rebake_every:
-            sizes = config.body_texture_size, config.head_texture_size
-            textures.update(bake_textures(avatar, training, posing, *sizes, colours))
+            textures.update(bake_textures(avatar, training, posing, config, colours))
             scene.follow_textures()
             logger.info("step %d: textures baked again", step)
         view = generator.choice(training)
@@ -357,7 +356,7 @@ def _loss(
         colour_weights: ``(G, 1)`` how strongly each Gaussian's colour is held to the texture's.
     """
     goal = target(view, background)
-    compared = view.region * (1 - _edge(view.mask, config.edge_band))
+    compared = view.region * (1 - mask_edge(view.mask, config.edge_band))
 
     def within(values: torch.Tensor, region: torch.Tensor) -> torch.Tensor:
         return (values * region).sum() / region.sum().clamp_min(1)
@@ -373,7 +372,7 @@ def _loss(
     }
 
 
-def _edge(mask: torch.Tensor, band: int) -> torch.Tensor:
+def mask_edge(mask: torch.Tensor, band: int) -> torch.Tensor:
     """``(H, W)`` 1 within ``band`` pixels of the ``(H, W)`` mask's edge, on either side."""
     size = 2 * band + 1
     grown = F.max_pool2d(mask[None, None], size, 1, band)[0, 0]

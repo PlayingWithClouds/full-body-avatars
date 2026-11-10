@@ -14,7 +14,9 @@ from pathlib import Path
 
 import mediapipe as mp
 import numpy as np
-from mediapipe.tasks.python import BaseOptions, vision
+from mediapipe.tasks.python import vision
+
+from avatar_splats.preprocess.gpu_tasks import create_task
 
 HAND_LANDMARKER_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
@@ -40,36 +42,53 @@ def download_hand_landmarker(path: Path) -> Path:
     return path
 
 
+def hand_landmarker(model_path: Path, gpu: bool = False):
+    """MediaPipe's hand landmarker as ``detect_hands`` uses it, for its ``landmarker``: created
+    once for many calls. Close it when done."""
+    return create_task(
+        vision.HandLandmarker,
+        vision.HandLandmarkerOptions,
+        model_path,
+        gpu,
+        running_mode=vision.RunningMode.IMAGE,
+        num_hands=2,
+    )
+
+
 def detect_hands(
-    frames: Sequence[np.ndarray], keypoints: np.ndarray, model_path: Path
+    frames: Sequence[np.ndarray],
+    keypoints: np.ndarray,
+    model_path: Path | None = None,
+    gpu: bool = False,
+    landmarker=None,
 ) -> np.ndarray:
     """Find the left and right hand's landmarks in RGB frames.
 
     Args:
         keypoints: ``(N, 17, 3)`` COCO body keypoints of the frames.
+        gpu: run MediaPipe on the GPU where it gets one (``gpu_tasks``): about 5x faster per
+            hand.
+        landmarker: ``hand_landmarker``'s, used instead of creating one from ``model_path``.
 
     Returns:
         ``(N, 2, 21, 3)`` landmarks of the left and right hand as x, y in pixels and the
         landmarker's confidence in the hand; NaN where it was not found.
     """
-    options = vision.HandLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=str(model_path)),
-        running_mode=vision.RunningMode.IMAGE,
-        num_hands=2,
-    )
     hands = np.full((len(frames), 2, NUM_HAND_LANDMARKS, 3), np.nan)
-    with vision.HandLandmarker.create_from_options(options) as landmarker:
-        for i, frame in enumerate(frames):
-            for side in range(2):
-                elbow, wrist = keypoints[i, COCO_ELBOWS[side]], keypoints[i, COCO_WRISTS[side]]
-                if not min(elbow[2], wrist[2]) >= MIN_WRIST_CONFIDENCE:
-                    continue
-                half = CROP_PER_FOREARM * np.linalg.norm(wrist[:2] - elbow[:2])
-                found = _landmarks_in_crop(landmarker, frame, wrist[:2], half)
-                if found:
-                    hands[i, side] = min(
-                        found, key=lambda hand: np.linalg.norm(hand[0, :2] - wrist[:2])
-                    )
+    if landmarker is None:
+        with hand_landmarker(model_path, gpu) as own:
+            return detect_hands(frames, keypoints, gpu=gpu, landmarker=own)
+    for i, frame in enumerate(frames):
+        for side in range(2):
+            elbow, wrist = keypoints[i, COCO_ELBOWS[side]], keypoints[i, COCO_WRISTS[side]]
+            if not min(elbow[2], wrist[2]) >= MIN_WRIST_CONFIDENCE:
+                continue
+            half = CROP_PER_FOREARM * np.linalg.norm(wrist[:2] - elbow[:2])
+            found = _landmarks_in_crop(landmarker, frame, wrist[:2], half)
+            if found:
+                hands[i, side] = min(
+                    found, key=lambda hand: np.linalg.norm(hand[0, :2] - wrist[:2])
+                )
     return hands
 
 

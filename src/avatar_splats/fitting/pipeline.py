@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from avatar_splats.body_models.anny import AnnyBody
-from avatar_splats.body_models.hybrid import build_avatar, match_heads, rest_body, rest_head
+from avatar_splats.body_models.hybrid import (
+    build_avatar,
+    match_heads,
+    rest_body,
+    rest_head,
+    subdivide,
+)
 from avatar_splats.body_models.ict import IctFaceKit
 from avatar_splats.config import VIDEOS, Config
 from avatar_splats.data import probe
@@ -56,6 +62,8 @@ def fit_capture(config: Config) -> dict[str, Path]:
         config.fitting,
     )
     avatar = build_avatar(body, body_rest, head, head_rest, placement, config.body_models)
+    for _ in range(config.body_models.subdivisions):
+        avatar = subdivide(avatar, config.body_models.max_bone_influences)
     written["avatar"] = fitted_path(config, "avatar")
     avatar.save(written["avatar"])
     return written

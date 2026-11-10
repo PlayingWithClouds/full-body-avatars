@@ -24,3 +24,7 @@ vite.config.ts.timestamp-*
 
 # Avatar files hold the performer; serve them locally, never commit them.
 /static/*.avatar
+# Motion clips, linked from outputs/motion by `task viewer`.
+/static/motion
+# Face grids, linked from outputs/faces by `task viewer`.
+/static/faces

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,25 @@ def read_obj_uvs(path: str | Path) -> np.ndarray:
                 for i in range(1, len(polygon) - 1):
                     corners.append((polygon[0], polygon[i], polygon[i + 1]))
     return np.array(coordinates, dtype=np.float32)[np.array(corners)]
+
+
+def read_stl(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """Read an STL file, binary or ASCII, merging the corners its triangles share.
+
+    Returns:
+        ``(V, 3)`` float64 vertices in the file's units and ``(F, 3)`` int64 triangles.
+    """
+    data = Path(path).read_bytes()
+    if data[:5] == b"solid" and b"facet" in data[:1024]:
+        numbers = re.findall(rb"vertex\s+(\S+)\s+(\S+)\s+(\S+)", data)
+        corners = np.array(numbers, dtype=np.float64)
+    else:
+        count = int(np.frombuffer(data, np.uint32, 1, 80)[0])
+        record = np.dtype([("normal", "<f4", 3), ("corners", "<f4", (3, 3)), ("extra", "<u2")])
+        corners = np.frombuffer(data, record, count, 84)["corners"].reshape(-1, 3)
+        corners = corners.astype(np.float64)
+    vertices, faces = np.unique(corners, axis=0, return_inverse=True)
+    return vertices, faces.reshape(-1, 3).astype(np.int64)
 
 
 def read_obj_vertices(path: str | Path) -> np.ndarray:
@@ -209,3 +229,96 @@ def plane_barycentric(
     beta = (vv * wu - uv * wv) / denominator
     gamma = (uu * wv - uv * wu) / denominator
     return torch.stack((1 - beta - gamma, beta, gamma), dim=-1)
+
+
+def loop_subdivision(faces: torch.Tensor, num_vertices: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """One step of Loop subdivision: every triangle split in four, the surface smoothed.
+
+    Vertices ``num_vertices`` onwards are new, one per edge, in the order of
+    ``unique_edges(faces)``. Edges with one triangle are boundaries, kept as smooth curves;
+    edges with more than two, and the vertices on them, are kept where they are.
+
+    Returns:
+        ``(4 F, 3)`` triangles, those of each old triangle together and wound like it, and the
+        ``(V + E, V)`` sparse matrix that takes any per-vertex quantity of the old mesh to the
+        new one: positions, and also skinning weights or blendshapes, since its rows are convex.
+    """
+    device = faces.device
+    edges, half_edges = unique_edges(faces)
+    count = torch.bincount(half_edges, minlength=len(edges))
+    opposite = faces[:, [2, 0, 1]].T.reshape(-1)  # the corner facing each half-edge
+    interior = count == 2
+
+    rows, columns, values = [], [], []
+
+    def add(row: torch.Tensor, column: torch.Tensor, value: torch.Tensor | float) -> None:
+        rows.append(row)
+        columns.append(column)
+        values.append(torch.as_tensor(value, device=device).float().expand(len(row)))
+
+    # Edge vertices: 3/8 of each end and 1/8 of each opposite corner inside, the midpoint else.
+    new = num_vertices + torch.arange(len(edges), device=device)
+    end_share = torch.where(interior, 3 / 8, 1 / 2)
+    add(new, edges[:, 0], end_share)
+    add(new, edges[:, 1], end_share)
+    inner = interior[half_edges]
+    add(new[half_edges[inner]], opposite[inner], 1 / 8)
+
+    # Old vertices: averaged with their neighbours inside, with their two neighbours along a
+    # boundary, kept where a vertex is neither.
+    boundary_edges = edges[count == 1]
+    pinned = torch.zeros(num_vertices, dtype=torch.bool, device=device)
+    pinned[edges[count > 2].reshape(-1)] = True
+    on_boundary = torch.bincount(boundary_edges.reshape(-1), minlength=num_vertices)
+    pinned |= (on_boundary > 0) & (on_boundary != 2)
+    along = (on_boundary == 2) & ~pinned
+    neighbours = torch.cat((edges, edges.flip(1)))
+    valence = torch.bincount(neighbours[:, 0], minlength=num_vertices).float()
+    beta = torch.where(
+        valence > 3, 3 / (8 * valence.clamp_min(1)), torch.full_like(valence, 3 / 16)
+    )
+    smooth = ~pinned & ~along & (valence > 0)
+    vertices = torch.arange(num_vertices, device=device)
+    centre = torch.where(smooth, 1 - valence * beta, torch.where(along, 3 / 4, 1.0))
+    add(vertices, vertices, centre)
+    chosen = smooth[neighbours[:, 0]]
+    add(neighbours[chosen, 0], neighbours[chosen, 1], beta[neighbours[chosen, 0]])
+    ends = torch.cat((boundary_edges, boundary_edges.flip(1)))
+    ends = ends[along[ends[:, 0]]]
+    add(ends[:, 0], ends[:, 1], 1 / 8)
+
+    size = (num_vertices + len(edges), num_vertices)
+    indices = torch.stack((torch.cat(rows), torch.cat(columns)))
+    matrix = torch.sparse_coo_tensor(
+        indices, torch.cat(values), size, check_invariants=True
+    ).coalesce()
+
+    a, b, c = faces.unbind(-1)
+    ab, bc, ca = (new[half_edges.view(3, -1)[i]] for i in range(3))
+    split = torch.stack(
+        (
+            torch.stack((a, ab, ca), -1),
+            torch.stack((ab, b, bc), -1),
+            torch.stack((ca, bc, c), -1),
+            torch.stack((ab, bc, ca), -1),
+        ),
+        dim=1,
+    )
+    return split.reshape(-1, 3), matrix
+
+
+def unique_edges(faces: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(E, 2)`` the mesh's edges, lower vertex first, and the ``(3 F,)`` edge of each
+    half-edge: first every triangle's edge from corner 0 to 1, then 1 to 2, then 2 to 0."""
+    half = torch.cat((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
+    return torch.unique(half.sort(dim=1).values, dim=0, return_inverse=True)
+
+
+def adjacent_faces(faces: torch.Tensor) -> torch.Tensor:
+    """``(A, 2)`` pairs of indices of triangles that share an edge, each pair once."""
+    _, edge_of = unique_edges(faces)
+    owners = torch.arange(len(faces), device=faces.device).repeat(3)
+    order = torch.argsort(edge_of, stable=True)
+    edges, owners = edge_of[order], owners[order]
+    shared = edges[1:] == edges[:-1]
+    return torch.stack((owners[:-1][shared], owners[1:][shared]), dim=1)

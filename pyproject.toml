@@ -10,6 +10,8 @@ dependencies = [
     "gsplat>=1.5.3",
     "mediapipe>=0.10",
     "numpy>=2",
+    "onnxruntime>=1.20",
+    "opencv-contrib-python>=4.10",
     "pillow>=11",
     "pyyaml>=6",
     "scipy>=1.14",
@@ -29,13 +31,19 @@ dev = [
 ]
 notebooks = [
     "ipykernel>=6",
+    "ipywidgets>=8",
     "jupyterlab>=4",
     "matplotlib>=3.9",
+    "nvdiffrast",
     "plotly>=6",
+    "ultralytics>=8.4",
 ]
 
 [tool.uv]
 default-groups = ["dev", "notebooks"]
+no-build-isolation-package = ["nvdiffrast"]
+# Ultralytics asks for opencv-python, which installs the same cv2 as our opencv-contrib-python.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
 
 [[tool.uv.index]]
 name = "pytorch-cu132"
@@ -45,6 +53,7 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu132" }
 torchvision = { index = "pytorch-cu132" }
+nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", tag = "v0.4.0" }
 
 [build-system]
 requires = ["hatchling"]

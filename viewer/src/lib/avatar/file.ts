@@ -1,8 +1,9 @@
 /**
  * Reading `.avatar` files, as written by `avatar_splats.export.avatar_file`.
  *
- * Layout, little-endian: the magic `AVATAR01`, a uint32 header length, a UTF-8 JSON header
- * padded to 16 bytes, then C-ordered arrays at the byte offsets the header gives.
+ * Layout, little-endian: an 8-byte magic (`AVATAR01`), a uint32 header length, a UTF-8 JSON
+ * header padded to 16 bytes, then C-ordered arrays at the byte offsets the header gives.
+ * `.motion` files share the layout with their own magic (`readContainer`).
  */
 
 export type ArrayData =
@@ -25,6 +26,64 @@ export interface AvatarMetadata {
 	quaternion_order: string;
 	textures: string[];
 	occlusion_margin: number;
+	/** Since format 3: the parts' names, indexed by `face_parts`. */
+	parts?: string[];
+	/** Since format 3: what the eye material draws the eyeballs from. */
+	eyes?: EyeMetadata;
+	/** Since format 3: the inside of the mouth's regions (`mouth_regions`) and stock colours. */
+	mouth?: MouthMetadata;
+	/** Since format 3: the lashes and brows, strands bound to the face (`render/face_hair.ts`). */
+	face_hair?: {
+		points_per_strand: number;
+		/** Indexed by `hair_groups`; colours RGB in [0, 1]. */
+		groups: { name: string; colour: [number, number, number] }[];
+	};
+	/** Since format 4: the light the videos were lit by; the skin's textures then hold albedo. */
+	lighting?: LightingMetadata;
+	/** Since format 4: expression-dependent detail on the head's albedo (`wrinkle_textures`). */
+	wrinkles?: WrinkleMetadata;
+}
+
+export interface LightingMetadata {
+	/** `(9, 3)` RGB coefficients of real spherical harmonics up to degree 2 (`render/skin.ts`). */
+	sh: [number, number, number][];
+}
+
+export interface WrinkleMetadata {
+	/** `(K)` the expression each wrinkle map belongs to, each one of `expressions`. */
+	expressions: string[];
+	/** The albedo change a map's byte of 255 makes at weight 1 (128 makes none, 1 the opposite). */
+	scale: number;
+	/** `[u0, v0, u1, v1]` the part of the head texture the maps cover. */
+	region: [number, number, number, number];
+	/** The maps' side, in texels. */
+	size: number;
+}
+
+export interface MouthMetadata {
+	/** Indexed by `mouth_regions`; the first, 0, is outside the mouth. */
+	regions: string[];
+	/** RGB in [0, 1] by region name: teeth, gums, tongue, socket, inner_lips. */
+	colours: Record<string, [number, number, number]>;
+}
+
+export interface EyeMetadata {
+	/** RGB in [0, 1], as the video shows them. */
+	iris_colour: [number, number, number];
+	sclera_colour: [number, number, number];
+	/** How far the iris reaches from the eyeball's front, in radians seen from its centre. */
+	iris_angle: number;
+	eyeballs: Eyeball[];
+}
+
+export interface Eyeball {
+	side: 'left' | 'right';
+	/** In the rest pose, metres. */
+	centre: [number, number, number];
+	radius: number;
+	/** The vertex at its front and the one at its top, which show how it is turned. */
+	apex: number;
+	top: number;
 }
 
 export interface AvatarFile {
@@ -33,7 +92,11 @@ export interface AvatarFile {
 }
 
 const MAGIC = 'AVATAR01';
-const SUPPORTED_VERSION = 2;
+/**
+ * Format 3 adds the parts and the eyes to format 2; without them the eyes show their texture.
+ * Format 4 adds the learned light and wrinkle maps, and may have no Gaussians.
+ */
+const SUPPORTED_VERSIONS = [2, 3, 4];
 
 const DTYPES: Record<
 	string,
@@ -48,26 +111,39 @@ const DTYPES: Record<
 };
 
 export function readAvatar(buffer: ArrayBuffer): AvatarFile {
-	const bytes = new Uint8Array(buffer);
-	const magic = new TextDecoder().decode(bytes.subarray(0, MAGIC.length));
-	if (magic !== MAGIC) throw new Error('not an avatar file');
-	const length = new DataView(buffer).getUint32(MAGIC.length, true);
-	const start = MAGIC.length + 4;
-	const header = JSON.parse(new TextDecoder().decode(bytes.subarray(start, start + length)));
-	const { arrays: layout, ...metadata } = header;
-	if (metadata.format_version !== SUPPORTED_VERSION) {
+	const { metadata, arrays } = readContainer(buffer, MAGIC, 'avatar');
+	if (!SUPPORTED_VERSIONS.includes(metadata.format_version as number)) {
 		throw new Error(
-			`avatar format ${metadata.format_version}, this viewer reads ${SUPPORTED_VERSION}`
+			`avatar format ${metadata.format_version}, this viewer reads ${SUPPORTED_VERSIONS.join(', ')}`
 		);
 	}
+	return { metadata: metadata as unknown as AvatarMetadata, arrays };
+}
+
+/** The metadata and arrays of a file in the avatar file's layout with the given magic. */
+export function readContainer(
+	buffer: ArrayBuffer,
+	magic: string,
+	kind: string
+): { metadata: Record<string, unknown>; arrays: Record<string, AvatarArray> } {
+	const bytes = new Uint8Array(buffer);
+	if (new TextDecoder().decode(bytes.subarray(0, magic.length)) !== magic) {
+		throw new Error(`not ${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind} file`);
+	}
+	const length = new DataView(buffer).getUint32(magic.length, true);
+	const start = magic.length + 4;
+	const header = JSON.parse(new TextDecoder().decode(bytes.subarray(start, start + length)));
+	const { arrays: layout, ...metadata } = header;
 
 	const arrays: Record<string, AvatarArray> = {};
 	for (const [name, entry] of Object.entries(layout) as [string, ArrayEntry][]) {
 		const type = DTYPES[entry.dtype];
 		if (!type) throw new Error(`${name}: unsupported dtype ${entry.dtype}`);
 		const count = entry.shape.reduce((a, b) => a * b, 1);
-		// Offsets are 16-byte aligned, so typed arrays can view the buffer directly.
-		arrays[name] = { data: new type(buffer, entry.offset, count), shape: entry.shape };
+		// Offsets are 16-byte aligned, so typed arrays can view the buffer directly. An empty
+		// array's offset may lie past the end of the file.
+		const data = count ? new type(buffer, entry.offset, count) : new type(new ArrayBuffer(0), 0, 0);
+		arrays[name] = { data, shape: entry.shape };
 	}
 	return { metadata, arrays };
 }

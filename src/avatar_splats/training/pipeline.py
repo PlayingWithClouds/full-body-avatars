@@ -53,8 +53,7 @@ def load_posing(config: Config, avatar: Avatar) -> Posing:
 
 def bake(config: Config, avatar: Avatar, views: list[View], posing: Posing) -> TextureRecord:
     """The avatar's textures baked from the training frames, before training."""
-    sizes = config.training.body_texture_size, config.training.head_texture_size
-    return bake_textures(avatar, training_views(views, config.training), posing, *sizes)
+    return bake_textures(avatar, training_views(views, config.training), posing, config.training)
 
 
 def train_capture(config: Config) -> dict[str, Path]:

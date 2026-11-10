@@ -30,3 +30,6 @@ class Preprocessed(ArrayRecord):
     face_landmarks: np.ndarray | None = None
     """``(N, 478, 3)`` float: MediaPipe face landmarks as x, y in pixels and depth, in pixels
     of image width, relative to the head's center."""
+    ignored: np.ndarray | None = None
+    """``(N, H, W)`` bool: pixels where the fits do not compare silhouettes, such as hair, which
+    the bald avatar has no surface for."""

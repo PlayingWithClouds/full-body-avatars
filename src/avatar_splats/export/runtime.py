@@ -2,8 +2,9 @@
 
 Per frame:
 
-1. Forward kinematics: the animation gives each bone a rotation relative to its bind pose; the
-   bones' world transforms follow down the hierarchy (``forward_kinematics``).
+1. Forward kinematics: the animation gives each bone a rotation relative to its bind pose, and
+   the root an offset from its bind position (root motion); the bones' world transforms follow
+   down the hierarchy (``forward_kinematics``).
 2. Skinning matrices: each bone's world transform times the inverse of its bind pose.
 3. Expressions: the head's rest vertices plus the expression blendshapes, weighted.
 4. Linear blend skinning of all vertices.
@@ -12,6 +13,9 @@ Per frame:
    rotation and scale in the triangle's frame.
 7. The Gaussians are splatted over the mesh, colours from their spherical harmonics plus 0.5,
    each depth-tested against the mesh with a margin of ``occlusion_margin`` triangle sizes.
+
+Several avatars in one scene are drawn together: their meshes into one depth buffer, then all
+their Gaussians in one pass, sorted together, so each hides behind the others where it should.
 """
 
 from __future__ import annotations
@@ -27,7 +31,10 @@ from avatar_splats.rendering import composite, render_mesh
 
 
 def forward_kinematics(
-    bind_poses: torch.Tensor, parents: list[int], rotations: torch.Tensor
+    bind_poses: torch.Tensor,
+    parents: list[int],
+    rotations: torch.Tensor,
+    root_offset: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """World transforms of bones rotated relative to their bind pose.
 
@@ -35,6 +42,7 @@ def forward_kinematics(
         bind_poses: ``(J, 4, 4)`` bone frames in the bind pose; parents come before children.
         parents: parent index per bone, -1 for the root.
         rotations: ``(B, J, 3, 3)`` rotation of each bone in its own bind frame.
+        root_offset: ``(B, 3)`` the root's offset from its bind position, in world axes.
 
     Returns:
         ``(B, J, 4, 4)`` bone transforms in the world.
@@ -50,7 +58,11 @@ def forward_kinematics(
             else torch.linalg.inv(bind_poses[parent]) @ bind_poses[bone]
         )
         base = relative if parent < 0 else world[parent] @ relative
-        world.append(base @ local[:, bone])
+        transform = base @ local[:, bone]
+        if parent < 0 and root_offset is not None:
+            transform = transform.clone()
+            transform[:, :3, 3] += root_offset
+        world.append(transform)
     return torch.stack(world, dim=1)
 
 
@@ -77,7 +89,7 @@ class AvatarRuntime(torch.nn.Module):
             Avatar(
                 rest_vertices=arrays["rest_vertices"],
                 faces=arrays["faces"].astype(np.int64),
-                face_parts=np.zeros(len(arrays["faces"]), np.int8),
+                face_parts=arrays["face_parts"].astype(np.int8),
                 uvs=arrays["uvs"],
                 face_textures=arrays["face_textures"].astype(np.int8),
                 bone_indices=arrays["bone_indices"].astype(np.int64),
@@ -109,16 +121,23 @@ class AvatarRuntime(torch.nn.Module):
             )
         )
 
-    def skinning(self, rotations: torch.Tensor) -> torch.Tensor:
-        """``(B, J, 4, 4)`` skinning matrices for ``(B, J, 3, 3)`` bind-relative bone rotations."""
-        world = forward_kinematics(self.rig.bind_poses, self.parents, rotations)
+    def skinning(
+        self, rotations: torch.Tensor, root_offset: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """``(B, J, 4, 4)`` skinning matrices for ``(B, J, 3, 3)`` bind-relative bone rotations
+        and ``(B, 3)`` root offsets."""
+        world = forward_kinematics(self.rig.bind_poses, self.parents, rotations, root_offset)
         return world @ torch.linalg.inv(self.rig.bind_poses)
 
     def pose(
-        self, rotations: torch.Tensor, expressions: torch.Tensor | None = None
+        self,
+        rotations: torch.Tensor,
+        expressions: torch.Tensor | None = None,
+        root_offset: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """``(B, V, 3)`` vertices for bone rotations and ``(B, E)`` expression weights."""
-        return self.rig(self.skinning(rotations), expressions)
+        """``(B, V, 3)`` vertices for bone rotations, ``(B, E)`` expression weights and ``(B, 3)``
+        root offsets."""
+        return self.rig(self.skinning(rotations, root_offset), expressions)
 
     def place(self, vertices: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Means, wxyz rotations, scales, opacities and SH of the Gaussians on ``(V, 3)``."""
@@ -128,20 +147,28 @@ class AvatarRuntime(torch.nn.Module):
     def render(
         self, vertices: torch.Tensor, camera: Camera, background: torch.Tensor
     ) -> torch.Tensor:
-        """``(H, W, 3)`` image of the avatar posed as ``(V, 3)`` vertices, over a ``(3,)``
-        background colour."""
+        """``(H, W, 3)`` image of the avatar posed as ``(V, 3)`` vertices, or of several copies
+        of it posed as ``(P, V, 3)``, over a ``(3,)`` background colour."""
+        copies = vertices.reshape(-1, *vertices.shape[-2:])
         faces = self.rig.faces
+        count = copies.shape[1]
+        all_faces = torch.cat([faces + i * count for i in range(len(copies))])
         mesh = render_mesh(
-            vertices,
-            faces,
-            self.uvs,
-            self.face_textures,
+            copies.flatten(0, 1),
+            all_faces,
+            self.uvs.repeat(len(copies), 1, 1),
+            self.face_textures.repeat(len(copies)),
             [getattr(self, name) for name in self.texture_names],
             camera,
             torch.zeros_like(background),
         )
-        means, rotations, scales, opacities, sh = self.place(vertices)
-        margins = self.occlusion_margin * self.gaussians.triangle_sizes(vertices, faces)
+        placed = [self.place(v) for v in copies]
+        means, rotations, scales, opacities, sh = (
+            torch.cat(parts) for parts in zip(*placed, strict=True)
+        )
+        margins = self.occlusion_margin * torch.cat(
+            [self.gaussians.triangle_sizes(v, faces) for v in copies]
+        )
         image, alpha = composite(
             means, rotations, scales, opacities, sh, margins, mesh, camera, self.sh_degree
         )

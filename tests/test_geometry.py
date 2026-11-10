@@ -5,9 +5,22 @@ import roma
 import torch
 from torch.testing import assert_close
 
+from avatar_splats.body_models import ict
 from avatar_splats.body_models.hybrid import _umeyama
-from avatar_splats.body_models.mesh import read_obj, triangle_frames, uniform_laplacian
-from avatar_splats.body_models.skinning import linear_blend_skinning, sparsify_weights
+from avatar_splats.body_models.mesh import (
+    adjacent_faces,
+    loop_subdivision,
+    read_obj,
+    read_stl,
+    triangle_frames,
+    uniform_laplacian,
+)
+from avatar_splats.body_models.skinning import (
+    linear_blend_skinning,
+    skinned_point_weights,
+    skinned_points,
+    sparsify_weights,
+)
 from avatar_splats.cameras import Camera
 
 
@@ -82,3 +95,89 @@ def test_camera_height_and_depth_agree():
     top = camera.project(torch.tensor([0.0, depth, 0.8]))
     bottom = camera.project(torch.tensor([0.0, depth, -0.8]))
     assert np.isclose(float(bottom[1] - top[1]), 300, atol=1e-3)
+
+
+def test_loop_subdivision_keeps_a_plane_flat_and_splits_every_triangle():
+    vertices, faces = grid(4)
+    split, matrix = loop_subdivision(faces, len(vertices))
+    assert len(split) == 4 * len(faces)
+    new = matrix @ vertices
+    assert_close(new[:, 2], torch.zeros(len(new)))
+    assert_close(torch.sparse.sum(matrix, dim=1).to_dense(), torch.ones(len(new)))
+    # Every new triangle faces the way the old ones did.
+    corners = new[split]
+    normals = torch.linalg.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    old = vertices[faces[0]]
+    facing = torch.linalg.cross(old[1] - old[0], old[2] - old[0])[2]
+    assert (normals[:, 2] * facing > 0).all()
+
+
+def test_loop_subdivision_follows_its_rules_on_a_tetrahedron():
+    vertices = torch.tensor([[1.0, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]])
+    faces = torch.tensor([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]])
+    split, matrix = loop_subdivision(faces, 4)
+    new = matrix @ vertices
+    assert len(new) == 10 and len(split) == 16
+    # Corners: 7/16 of themselves and 3/16 of each of three neighbours; edges: 3/8 of each end
+    # and 1/8 of each opposite corner. Rounder, and much smaller, as Loop makes a tetrahedron.
+    assert_close(new[:4], vertices / 4)
+    assert_close(new[4:].norm(dim=-1), torch.full((6,), 0.5))
+
+
+def test_skinned_points_match_regressing_skinned_vertices():
+    generator = torch.Generator().manual_seed(0)
+    vertices, bones = 30, 5
+    rest = torch.randn(vertices, 3, generator=generator)
+    indices = torch.randint(0, bones, (vertices, 3), generator=generator)
+    weights = torch.rand(vertices, 3, generator=generator)
+    weights = weights / weights.sum(dim=1, keepdim=True)
+    regressor = torch.rand(4, vertices, generator=generator)
+    skinning = torch.eye(4).repeat(2, bones, 1, 1)
+    skinning[..., :3, :] = torch.randn(2, bones, 3, 4, generator=generator)
+
+    expected = regressor @ linear_blend_skinning(rest, indices, weights, skinning)
+    found = skinned_points(
+        skinning, skinned_point_weights(regressor, rest, indices, weights, bones)
+    )
+    torch.testing.assert_close(found, expected)
+
+
+def test_turn_eyes_turns_each_eyeball_about_its_centre_and_nothing_else():
+    vertices = torch.randn(ict.EYEBALLS.stop, 3, dtype=torch.float64)
+    rotations = torch.tensor([[0.3, -0.2, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float64)
+
+    turned = ict.turn_eyes(vertices, rotations)
+
+    assert_close(turned[: ict.EYEBALLS.start], vertices[: ict.EYEBALLS.start])
+    left, right = ict.EYEBALL_ORDER
+    assert_close(turned[right], vertices[right])
+    assert_close(turned[left].mean(0), vertices[left].mean(0))
+    centred = vertices[left] - vertices[left].mean(0)
+    expected = centred @ roma.rotvec_to_rotmat(rotations[0]).T + vertices[left].mean(0)
+    assert_close(turned[left], expected)
+
+
+def test_adjacent_faces_pairs_triangles_sharing_an_edge():
+    # A fan of three triangles around vertex 0: 0-1 share edge (0, 2), 1-2 share edge (0, 3).
+    faces = torch.tensor([[0, 1, 2], [0, 2, 3], [0, 3, 4]])
+    pairs = adjacent_faces(faces).sort(dim=1).values
+    assert sorted(map(tuple, pairs.tolist())) == [(0, 1), (1, 2)]
+
+
+def test_read_stl_reads_binary_and_ascii_files_alike(tmp_path):
+    corners = np.array([[[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[1, 0, 0], [1, 1, 0], [0, 1, 0]]])
+    record = np.dtype([("normal", "<f4", 3), ("corners", "<f4", (3, 3)), ("extra", "<u2")])
+    rows = np.zeros(2, record)
+    rows["corners"] = corners
+    (tmp_path / "binary.stl").write_bytes(bytes(80) + np.uint32(2).tobytes() + rows.tobytes())
+    facets = "".join(
+        "facet normal 0 0 1\nouter loop\n"
+        + "".join(f"vertex {x} {y} {z}\n" for x, y, z in triangle)
+        + "endloop\nendfacet\n"
+        for triangle in corners
+    )
+    (tmp_path / "ascii.stl").write_text(f"solid test\n{facets}endsolid test\n")
+    for name in ("binary.stl", "ascii.stl"):
+        vertices, faces = read_stl(tmp_path / name)
+        assert len(vertices) == 4
+        np.testing.assert_allclose(vertices[faces], corners)

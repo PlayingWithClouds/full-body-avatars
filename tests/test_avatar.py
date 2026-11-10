@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pytest
 import roma
@@ -5,10 +7,26 @@ import torch
 from numpy.testing import assert_array_equal
 from torch.testing import assert_close
 
-from avatar_splats.body_models.hybrid import Avatar, Rig
-from avatar_splats.export import AvatarRuntime, avatar_arrays, read_avatar, write_avatar
+from avatar_splats.body_models.hybrid import EYES, Avatar, Rig
+from avatar_splats.export import (
+    AvatarRuntime,
+    FaceHair,
+    avatar_arrays,
+    read_avatar,
+    write_avatar,
+)
 from avatar_splats.gaussians import BoundGaussians
 from avatar_splats.training import TextureRecord
+
+EYES_ENTRY = {"iris_colour": [0.4, 0.5, 0.45], "sclera_colour": [0.9, 0.88, 0.86]}
+HAIR = FaceHair(
+    faces=np.array([1]),
+    barycentric=np.full((1, 3), 1 / 3),
+    points=np.linspace([0, 0, 0], [0.01, 0, 0.002], 6)[None],
+    widths=np.array([1e-4]),
+    groups=np.array([0]),
+)
+HAIR_ENTRY = {"points_per_strand": 6, "groups": [{"name": "lashes", "colour": [0.1, 0.1, 0.1]}]}
 
 
 @pytest.fixture
@@ -83,7 +101,7 @@ def test_gaussians_follow_their_triangles(avatar, gaussians):
 
 
 def test_avatar_file_round_trip(tmp_path, avatar, gaussians, textures):
-    written = avatar_arrays(avatar, gaussians.record(), textures, 2.0)
+    written = avatar_arrays(avatar, gaussians.record(), textures, 2.0, EYES_ENTRY, HAIR, HAIR_ENTRY)
     write_avatar(tmp_path / "test.avatar", written)
     read = read_avatar(tmp_path / "test.avatar")
     assert read.metadata["bones"] == ["root", "head"]
@@ -94,8 +112,22 @@ def test_avatar_file_round_trip(tmp_path, avatar, gaussians, textures):
         assert_array_equal(read.arrays[name], array)
 
 
+def test_eyes_are_stored_and_lose_their_gaussians(avatar, gaussians, textures):
+    avatar = dataclasses.replace(avatar, face_parts=np.array([0, EYES], np.int8))
+    written = avatar_arrays(avatar, gaussians.record(), textures, 2.0, EYES_ENTRY, HAIR, HAIR_ENTRY)
+    assert written.metadata["eyes"] == EYES_ENTRY
+    assert written.metadata["parts"][EYES] == "eyes"
+    assert_array_equal(written.arrays["face_parts"], [0, EYES])
+    kept = written.arrays["gaussian_faces"]
+    assert 0 < len(kept) < len(gaussians.record().faces)
+    assert (kept == 0).all()
+
+
 def test_runtime_reproduces_the_trained_avatar(tmp_path, avatar, gaussians, textures):
-    write_avatar(tmp_path / "test.avatar", avatar_arrays(avatar, gaussians.record(), textures, 2.0))
+    write_avatar(
+        tmp_path / "test.avatar",
+        avatar_arrays(avatar, gaussians.record(), textures, 2.0, EYES_ENTRY, HAIR, HAIR_ENTRY),
+    )
     runtime = AvatarRuntime(read_avatar(tmp_path / "test.avatar"))
 
     # Bones at rest pose the mesh in its rest pose.

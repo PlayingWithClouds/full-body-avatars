@@ -1,5 +1,9 @@
 version: "3"
 
+vars:
+  # Another capture: go-task fit CONFIG=configs/performer-2.yaml
+  CONFIG: configs/default.yaml
+
 tasks:
   setup:
     desc: Install dependencies and the git hooks
@@ -38,27 +42,37 @@ tasks:
   inspect:
     desc: Describe the capture videos
     cmds:
-      - uv run avatar-splats inspect
+      - uv run avatar-splats --config {{.CONFIG}} inspect
 
   preprocess:
     desc: "Preprocess the capture videos (all, or name them: task preprocess -- body)"
     cmds:
-      - uv run avatar-splats preprocess {{.CLI_ARGS}}
+      - uv run avatar-splats --config {{.CONFIG}} preprocess {{.CLI_ARGS}}
 
   fit:
     desc: Fit the body and head models and build the avatar's mesh
     cmds:
-      - uv run avatar-splats fit
+      - uv run avatar-splats --config {{.CONFIG}} fit
 
   train:
     desc: Train the avatar's Gaussians
     cmds:
-      - uv run avatar-splats train
+      - uv run avatar-splats --config {{.CONFIG}} train
 
   export:
     desc: Write the avatar file for the game runtime
     cmds:
-      - uv run avatar-splats export
+      - uv run avatar-splats --config {{.CONFIG}} export
+
+  faces:
+    desc: "Convert a video's face landmarks to the avatar's face (default head_expressions: task faces -- body)"
+    cmds:
+      - uv run avatar-splats --config {{.CONFIG}} faces {{.CLI_ARGS}}
+
+  motion:
+    desc: "Extract the motion of the people in a video: task motion -- path/to/video.mp4"
+    cmds:
+      - uv run avatar-splats --config {{.CONFIG}} motion {{.CLI_ARGS}}
 
   pipeline:
     desc: Run every stage, from the videos to the avatar file
@@ -74,4 +88,7 @@ tasks:
     cmds:
       - bun install
       - ln -sf {{.ROOT_DIR}}/outputs/export/performer.avatar static/performer.avatar
+      - ln -sfn {{.ROOT_DIR}}/outputs/motion static/motion
+      - mkdir -p {{.ROOT_DIR}}/outputs/faces
+      - ln -sfn {{.ROOT_DIR}}/outputs/faces static/faces
       - bun run dev

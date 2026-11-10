@@ -6,7 +6,8 @@ from torch.testing import assert_close
 
 from avatar_splats.gaussians import BoundGaussians, GaussianRecord
 from avatar_splats.training import ColourCorrection, fill_holes
-from avatar_splats.training.train import _edge
+from avatar_splats.training.textures import _bands, choose_views
+from avatar_splats.training.train import mask_edge
 
 
 def test_holes_are_filled_from_their_surroundings():
@@ -51,7 +52,7 @@ def test_colours_turn_back_into_the_reference():
 def test_the_edge_band_lies_on_both_sides_of_the_mask_edge():
     mask = torch.zeros(1, 20)
     mask[:, :10] = 1
-    band = _edge(mask.expand(20, 20).contiguous(), 2)[10]
+    band = mask_edge(mask.expand(20, 20).contiguous(), 2)[10]
     assert band.nonzero().flatten().tolist() == [8, 9, 10, 11]
 
 
@@ -91,3 +92,31 @@ def test_offsets_are_limited_in_length():
     )
     gaussians.limit_offsets(torch.tensor([1.0, 1.0]))
     assert_close(gaussians.offsets, torch.tensor([[0.6, 0, 0.8], [0.1, 0, 0]]))
+
+
+def test_bands_add_up_and_keep_the_background_out():
+    image = torch.zeros(16, 16, 3)
+    image[:, :8] = 0.6  # the performer on the left, a dark background on the right
+    image[14, 4] = 1.0  # a fine detail, far from the rows checked at the edge
+    mask = torch.zeros(16, 16)
+    mask[:, :8] = 1
+    broad, detail = _bands(image, mask, 2.0)
+    assert_close(broad + detail, image)
+    assert_close(broad[:6, 7], torch.full((6, 3), 0.6), atol=1e-6, rtol=0)  # edge stays skin
+    assert detail[14, 4, 0] > 0.3 > broad[14, 4, 0] - 0.6
+
+
+def test_triangles_take_their_neighbours_view_unless_their_own_is_much_better():
+    quality = torch.tensor([
+        [1.0, 0.5, 0.0],
+        [1.0, 0.5, 0.0],
+        [0.9, 1.0, 0.0],  # a little better seen by view 1, between two triangles on view 0
+        [1.0, 0.2, 5.0],  # best seen by the fallback view, but a main view sees it too
+        [0.0, 0.0, 1.0],  # seen by the fallback view only
+        [0.0, 0.0, 0.0],  # seen by none
+    ])  # fmt: skip
+    fallback = torch.tensor([False, False, True])
+    chain = torch.tensor([[0, 1], [1, 2], [2, 3]])
+
+    assert choose_views(quality, fallback, chain, 0.25).tolist() == [0, 0, 0, 0, 2, -1]
+    assert choose_views(quality, fallback, chain, 0.0).tolist() == [0, 0, 1, 0, 2, -1]

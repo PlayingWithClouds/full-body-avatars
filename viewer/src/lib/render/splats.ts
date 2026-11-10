@@ -9,6 +9,9 @@
  *
  * Per-Gaussian data and the posed vertices live in float textures; only the posed vertices change
  * when the avatar moves, and only the draw order when the camera does.
+ *
+ * Several copies of the avatar, each posed on its own, share one draw: their Gaussians are
+ * sorted together, so where two avatars overlap each hides behind the other as it should.
  */
 
 import * as THREE from 'three';
@@ -20,7 +23,10 @@ const EXTENT = 3;
 
 export class Splats {
 	readonly object: THREE.Mesh;
+	/** Gaussians of one copy. */
 	readonly count: number;
+	readonly copies: number;
+	private readonly vertexCount: number;
 	private readonly material: THREE.ShaderMaterial;
 	private readonly order: THREE.InstancedBufferAttribute;
 	private readonly vertices: THREE.DataTexture;
@@ -28,12 +34,12 @@ export class Splats {
 	private readonly gaussianFaces: Uint32Array;
 	private readonly barycentric: Float32Array;
 	private readonly offsets: Float32Array;
-	/** ``(G * 3)`` the Gaussians' centres in the current pose, for sorting. */
+	/** ``(copies * G * 3)`` the Gaussians' centres in the current poses, for sorting. */
 	private readonly means: Float32Array;
 	private readonly depths: Float32Array;
 	private readonly sorted: Float32Array;
 
-	constructor(file: AvatarFile) {
+	constructor(file: AvatarFile, copies = 1) {
 		const gaussianFaces = array<Uint32Array>(file, 'gaussian_faces').data;
 		const barycentric = array<Float32Array>(file, 'gaussian_barycentric').data;
 		const offsets = array<Float32Array>(file, 'gaussian_offsets').data;
@@ -47,13 +53,16 @@ export class Splats {
 		const shCount = sh.shape[1];
 
 		this.count = count;
+		this.copies = copies;
+		this.vertexCount = vertexCount;
 		this.faces = faces;
 		this.gaussianFaces = gaussianFaces;
 		this.barycentric = barycentric;
 		this.offsets = offsets;
-		this.means = new Float32Array(3 * count);
-		this.depths = new Float32Array(count);
-		this.sorted = new Float32Array(count);
+		const total = copies * count;
+		this.means = new Float32Array(3 * total);
+		this.depths = new Float32Array(total);
+		this.sorted = new Float32Array(total);
 
 		const anchor = new Float32Array(4 * count);
 		const shape = new Float32Array(4 * count);
@@ -72,7 +81,7 @@ export class Splats {
 		for (let f = 0; f < faces.length / 3; f++)
 			faceData.set(faces.subarray(3 * f, 3 * f + 3), 4 * f);
 
-		this.vertices = floatTexture(new Float32Array(4 * vertexCount), vertexCount);
+		this.vertices = floatTexture(new Float32Array(4 * copies * vertexCount), copies * vertexCount);
 		this.material = new THREE.ShaderMaterial({
 			glslVersion: THREE.GLSL3,
 			vertexShader: VERTEX,
@@ -85,6 +94,8 @@ export class Splats {
 				colours: { value: floatTexture(colours, count * shCount) },
 				faceVertices: { value: uintTexture(faceData, faces.length / 3) },
 				vertices: { value: this.vertices },
+				gaussianCount: { value: count },
+				vertexCount: { value: vertexCount },
 				shCount: { value: shCount },
 				viewDependent: { value: true },
 				antialias: { value: false },
@@ -116,19 +127,23 @@ export class Splats {
 		this.order = new THREE.InstancedBufferAttribute(this.sorted, 1);
 		this.order.setUsage(THREE.DynamicDrawUsage);
 		geometry.setAttribute('splat', this.order);
-		geometry.instanceCount = count;
+		geometry.instanceCount = total;
 		this.object = new THREE.Mesh(geometry, this.material);
 		this.object.frustumCulled = false;
 		this.object.renderOrder = 1;
 	}
 
-	/** Move the Gaussians with ``(V * 3)`` posed vertices. */
-	setVertices(posed: Float32Array): void {
+	/** Move one copy's Gaussians with its ``(V * 3)`` posed vertices. */
+	setVertices(posed: Float32Array, copy = 0): void {
 		const data = this.vertices.image.data as Float32Array;
-		for (let v = 0; v < posed.length / 3; v++) data.set(posed.subarray(3 * v, 3 * v + 3), 4 * v);
+		const first = copy * this.vertexCount;
+		for (let v = 0; v < posed.length / 3; v++) {
+			data.set(posed.subarray(3 * v, 3 * v + 3), 4 * (first + v));
+		}
 		this.vertices.needsUpdate = true;
 		// The centres, as the vertex shader places them, decide the draw order.
-		const { faces, gaussianFaces, barycentric, offsets, means } = this;
+		const { faces, gaussianFaces, barycentric, offsets } = this;
+		const means = this.means.subarray(3 * copy * this.count, 3 * (copy + 1) * this.count);
 		for (let i = 0; i < this.count; i++) {
 			const f = 3 * gaussianFaces[i];
 			const a = 3 * faces[f];
@@ -143,12 +158,12 @@ export class Splats {
 			let nx = e1y * e2z - e1z * e2y;
 			let ny = e1z * e2x - e1x * e2z;
 			let nz = e1x * e2y - e1y * e2x;
-			const area = Math.hypot(nx, ny, nz) || 1e-12;
+			const area = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1e-12;
 			const size = Math.sqrt(area);
 			nx /= area;
 			ny /= area;
 			nz /= area;
-			const edge = Math.hypot(e1x, e1y, e1z) || 1e-12;
+			const edge = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z) || 1e-12;
 			const xx = e1x / edge;
 			const xy = e1y / edge;
 			const xz = e1z / edge;
@@ -183,7 +198,8 @@ export class Splats {
 	sort(camera: THREE.Camera): void {
 		const position = camera.getWorldPosition(new THREE.Vector3());
 		const forward = camera.getWorldDirection(new THREE.Vector3());
-		const { means, depths, count } = this;
+		const { means, depths } = this;
+		const count = this.copies * this.count;
 		let min = Infinity;
 		let max = -Infinity;
 		for (let i = 0; i < count; i++) {
@@ -272,7 +288,9 @@ uniform sampler2D rotations;  // wxyz relative to the triangle frame
 uniform sampler2D scales;     // log extents in triangle sizes
 uniform sampler2D colours;    // spherical harmonics, shCount texels per Gaussian
 uniform usampler2D faceVertices;
-uniform sampler2D vertices;   // posed vertices
+uniform sampler2D vertices;   // posed vertices, copy after copy
+uniform int gaussianCount;    // per copy
+uniform int vertexCount;      // per copy
 uniform int shCount;
 uniform bool viewDependent;
 uniform bool antialias;
@@ -292,8 +310,10 @@ const float EXTENT = ${EXTENT.toFixed(1)};
 const float SH_C0 = 0.28209479177387814;
 const float SH_C1 = 0.4886025119029199;
 
+int copyStart; // the first vertex of this splat's copy
+
 vec4 fetch(sampler2D data, int i) { return texelFetch(data, ivec2(i % WIDTH, i / WIDTH), 0); }
-vec3 vertexAt(uint i) { return fetch(vertices, int(i)).xyz; }
+vec3 vertexAt(uint i) { return fetch(vertices, copyStart + int(i)).xyz; }
 
 mat3 quaternionMatrix(vec4 q) {
 	q = normalize(q);
@@ -306,7 +326,10 @@ mat3 quaternionMatrix(vec4 q) {
 }
 
 void main() {
-	int i = int(splat);
+	int index = int(splat);
+	int copy = index / gaussianCount;
+	int i = index - copy * gaussianCount;
+	copyStart = copy * vertexCount;
 	vec4 anchor = fetch(anchors, i);
 	vec4 shape = fetch(shapes, i);
 	int face = int(anchor.w);

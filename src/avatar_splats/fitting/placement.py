@@ -44,6 +44,8 @@ COCO_FACE = [0, 1, 2]
 """Nose, left eye, right eye: the COCO keypoints the head model has counterparts for."""
 LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
 ITERATIONS = 300
+STEP_FRAMES = 24
+"""Frames drawn at random for each step: seven numbers need few to move them."""
 
 
 def place_head(
@@ -56,7 +58,8 @@ def place_head(
     preprocessed: Preprocessed,
     config: FittingConfig,
 ) -> HeadPlacement:
-    """Refine the head's placement on the body against the body video.
+    """Refine the head's placement on the body against the body video, where its silhouette is
+    not ``preprocessed.ignored``.
 
     Args:
         placement: where the head starts, e.g. from ``hybrid.match_heads``.
@@ -78,6 +81,10 @@ def place_head(
     shoulders = keypoints[:, [LEFT_SHOULDER, RIGHT_SHOULDER], 1].mean(dim=1) * scale
     rows = torch.arange(camera.height, device=device, dtype=torch.float32)
     region = (rows[None, :] < shoulders[:, None]).float()[:, :, None].expand_as(masks)
+    if preprocessed.ignored is not None:
+        ignored = torch.from_numpy(preprocessed.ignored).to(device).float()[:, None]
+        ignored = F.interpolate(ignored, (camera.height, camera.width), mode="area")[:, 0]
+        region = region * (ignored < 0.5)
 
     with torch.no_grad():
         skinning, body_vertices = fitted_body(fit, body)
@@ -103,8 +110,8 @@ def place_head(
         turned = (points - centre) @ roma.rotvec_to_rotmat(rotvec).T
         return log_scale.exp() * turned + centre + shift
 
-    def loss() -> dict[str, torch.Tensor]:
-        posed = linear_blend_skinning(adjust(start), bones, weights, skinning)
+    def loss(frames: torch.Tensor) -> dict[str, torch.Tensor]:
+        posed = linear_blend_skinning(adjust(start), bones, weights, skinning[frames])
         face = torch.stack(
             (
                 posed[:, landmarks[ICT_NOSE_TIP]],
@@ -113,17 +120,22 @@ def place_head(
             ),
             dim=1,
         )
-        points = torch.cat((torso_points, head_samples.points(posed, skin, inset)), dim=1)
+        points = torch.cat((torso_points[frames], head_samples.points(posed, skin, inset)), dim=1)
         silhouettes = render_silhouette(points, radius, camera)
         return {
             "keypoints": config.keypoint_weight
-            * keypoint_loss(camera.project(face), targets, confidence, camera.height),
-            "silhouette": config.silhouette_weight * silhouette_loss(silhouettes, masks, region),
+            * keypoint_loss(
+                camera.project(face), targets[frames], confidence[frames], camera.height
+            ),
+            "silhouette": config.silhouette_weight
+            * silhouette_loss(silhouettes, masks[frames], region[frames]),
         }
 
     optimizer = torch.optim.Adam([log_scale, rotvec, shift], lr=1e-3)
+    generator = torch.Generator(device=device).manual_seed(0)
     for iteration in range(ITERATIONS):
-        terms = loss()
+        frames = torch.randperm(len(masks), generator=generator, device=device)[:STEP_FRAMES]
+        terms = loss(frames)
         optimizer.zero_grad()
         sum(terms.values()).backward()
         optimizer.step()

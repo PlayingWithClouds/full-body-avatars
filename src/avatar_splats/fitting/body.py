@@ -10,6 +10,7 @@ the surface to match the outline instead, a step at the elbow, boxy breasts.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,6 +19,7 @@ import torch
 import torch.nn.functional as F
 
 from avatar_splats.body_models.anny import AnnyBody
+from avatar_splats.body_models.measurements import foot_ends
 from avatar_splats.body_models.skinning import linear_blend_skinning, sparsify_weights
 from avatar_splats.cameras import Camera, body_yaw
 from avatar_splats.config import FittingConfig
@@ -121,6 +123,101 @@ class HandJoints:
                 points.append(vertices[:, self.tips[5 * side + finger]])
             hands.append(torch.stack(points, dim=1))
         return torch.stack(hands, dim=1)
+
+
+def badly_fitted(iou: np.ndarray, spread: float, most: float) -> np.ndarray:
+    """``(N,)`` bool: the frames whose ``(N,)`` silhouette IoU falls more than ``spread`` robust
+    standard deviations (1.4826 times the median absolute deviation) below the median, at most
+    the worst ``most`` share of them; frames without an IoU (NaN) are among them."""
+    known = np.isfinite(iou)
+    median = np.median(iou[known])
+    deviation = 1.4826 * np.median(np.abs(iou[known] - median))
+    low = ~known | (iou < median - spread * deviation)
+    worst = np.argsort(np.where(known, iou, -np.inf))[: int(most * len(iou))]
+    out = np.zeros(len(iou), bool)
+    out[worst] = low[worst]
+    return out
+
+
+RELAXED_CURL = 10.0
+"""Degrees each finger joint of a relaxed hand bends towards the palm."""
+
+
+@torch.no_grad()
+def relaxed_hands(body: AnnyBody, rest_bone_poses: torch.Tensor) -> torch.Tensor:
+    """``(J, 3)`` Anny ``local-ref`` rotations of an open, relaxed hand (zero elsewhere): the
+    fingers brought together alongside the middle finger (Anny's zero pose spreads them) and
+    each joint bent ``RELAXED_CURL`` towards the palm; the thumb kept.
+
+    Each finger's sideways turn is searched for (its knuckle's z, whose direction differs by
+    side), the curl is +x on both hands.
+    """
+    device = rest_bone_poses.device
+    axes = rest_bone_poses[:, :3, :3]
+    zeros = torch.zeros(1, body.num_bones, 3, device=device)
+    angles = torch.deg2rad(torch.linspace(-30, 30, 121, device=device))
+    out = torch.zeros(body.num_bones, 3, device=device)
+
+    def direction(rotations: torch.Tensor, finger: int, side: str) -> torch.Tensor:
+        # (B, 3) a finger's direction, knuckle to last joint, for (B, J, 3) rotations
+        skinning = body.skinning(rest_bone_poses, rotations, zeros[:, 0].expand(len(rotations), 3))
+        heads = (skinning @ rest_bone_poses)[..., :3, 3]
+        first, last = (body.bone(f"finger{finger}-{j}.{side}") for j in (1, 3))
+        return F.normalize(heads[:, last] - heads[:, first], dim=-1)
+
+    for side in "LR":
+        middle = direction(zeros, 3, side)[0]
+        for finger in (2, 4, 5):
+            knuckle = body.bone(f"finger{finger}-1.{side}")
+            tried = zeros.repeat(len(angles), 1, 1)
+            tried[:, knuckle] = angles[:, None] * axes[knuckle, :, 2]
+            best = int((direction(tried, finger, side) @ middle).argmax())
+            out[knuckle] = angles[best] * axes[knuckle, :, 2]
+        for finger in range(2, 6):
+            for joint in (1, 2, 3):
+                bone = body.bone(f"finger{finger}-{joint}.{side}")
+                out[bone] += math.radians(RELAXED_CURL) * axes[bone, :, 0]
+    return out
+
+
+def surface_keypoint_vertices(
+    body: AnnyBody, rest: torch.Tensor, rest_bone_poses: torch.Tensor
+) -> torch.Tensor:
+    """``(12,)`` the vertices of Anny's matching ``preprocess.keypoints.EXTRA_KEYPOINTS``, picked
+    on ``(V, 3)`` rest vertices with ``(J, 4, 4)`` rest bone frames (the body faces -y, z up):
+
+    - the big and small toe: the foremost vertex of the first and the fifth toe,
+    - the heel: the hindmost of the foot's lowest third,
+    - the olecranon and the cubital fossa: the vertices near the elbow farthest behind and in
+      front of it, across the bend (a straight arm bends forwards),
+    - the acromion: the highest vertex near the shoulder joint.
+    """
+    heads = rest_bone_poses[:, :3, 3]
+    dominant = body.skin_weights.argmax(dim=1)
+
+    def of(*bones: str) -> torch.Tensor:
+        return torch.isin(dominant, torch.tensor([body.bone(b) for b in bones], device=rest.device))
+
+    def best(score: torch.Tensor, where: torch.Tensor) -> int:
+        return int(torch.where(where, score, -torch.inf).argmax())
+
+    feet = [vertex for ends in foot_ends(body, rest) for vertex in ends]
+    olecranon, fossa, acromion = [], [], []
+    for side in "LR":
+        shoulder, elbow, wrist = (
+            heads[body.bone(f"{b}.{side}")] for b in ("upperarm01", "lowerarm01", "wrist")
+        )
+        down = F.normalize(elbow - shoulder, dim=0)
+        inside = (wrist - elbow) / (wrist - elbow).norm() - down + rest.new_tensor([0, -0.5, 0])
+        inside = F.normalize(inside - (inside @ down) * down, dim=0)
+        arm = of(*(f"{b}.{side}" for b in ("upperarm01", "upperarm02", "lowerarm01", "lowerarm02")))
+        near_elbow = arm & ((rest - elbow).norm(dim=1) < 0.06)
+        olecranon.append(best(-(rest - elbow) @ inside, near_elbow))
+        fossa.append(best((rest - elbow) @ inside, near_elbow))
+        near_shoulder = (rest - shoulder).norm(dim=1) < 0.08
+        top = of(*(f"{b}.{side}" for b in ("clavicle", "shoulder01", "upperarm01")))
+        acromion.append(best(rest[:, 2], near_shoulder & top))
+    return torch.tensor(feet + olecranon + fossa + acromion, device=rest.device)
 
 
 class _BodyParameters(torch.nn.Module):

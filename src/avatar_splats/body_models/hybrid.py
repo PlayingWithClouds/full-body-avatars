@@ -7,8 +7,13 @@ neck bent to follow over ``neck_blend``, and a band of triangles closes the gap,
 one surface: drawn as a mesh, it neither cracks nor shows two necks fighting. The head's vertices
 take their skinning weights from Anny's nearest vertices, so the joined neck bends as one.
 
-The mesh carries two textures: the body's, in Anny's UV layout (which the band at the neck also
-uses), and the head's, in ICT-FaceKit's.
+Anny has no genitals; generated ones (``genitals``) replace its crotch. Their vertices come after
+the head's, so the blendshapes, which move every vertex from ``head_start`` on, carry their
+shapes next to the head's expressions.
+
+The mesh carries two textures: the body's, in Anny's UV layout (which the bands at the neck and
+the crotch also use), and an atlas: ICT-FaceKit's tiles for the head, and one more for the
+genitals.
 """
 
 from __future__ import annotations
@@ -24,12 +29,15 @@ import torch
 
 from avatar_splats.body_models import ict
 from avatar_splats.body_models.anny import AnnyBody
+from avatar_splats.body_models.genitals import build_insert
 from avatar_splats.body_models.ict import IctFaceKit
 from avatar_splats.body_models.mesh import (
     boundary_loops,
     closest_points,
+    loop_subdivision,
     plane_barycentric,
     uniform_laplacian,
+    unique_edges,
     zip_loops,
 )
 from avatar_splats.body_models.skinning import linear_blend_skinning, sparsify_weights
@@ -38,11 +46,16 @@ from avatar_splats.records import ArrayRecord
 
 logger = logging.getLogger(__name__)
 
-BODY, HEAD_SKIN, MOUTH, EYES, HANDS = 0, 1, 2, 3, 4
-"""Parts of the avatar's mesh, as stored in ``Avatar.face_parts``."""
+BODY, HEAD_SKIN, MOUTH, EYES, HANDS, GENITALS, CANALS = 0, 1, 2, 3, 4, 5, 6
+"""Parts of the avatar's mesh, as stored in ``Avatar.face_parts``: ``CANALS`` are the walls of
+the vagina and the anal canal, which no video sees."""
+PART_NAMES = ("body", "head_skin", "mouth", "eyes", "hands", "genitals", "canals")
+"""The parts' names, in the order of their numbers."""
 HEAD_PARTS = (HEAD_SKIN, MOUTH, EYES)
 BODY_TEXTURE, HEAD_TEXTURE = 0, 1
-"""The avatar's textures, as stored in ``Avatar.face_textures``."""
+"""The avatar's textures, as stored in ``Avatar.face_textures``: the head's is the atlas."""
+ATLAS_TILES = ict.UV_TILES + 1
+"""Square tiles side by side in the atlas: ICT-FaceKit's, then the genitals'."""
 
 ICT_TO_WORLD = torch.tensor([[1.0, 0, 0], [0, 0, -1], [0, 1, 0]])
 """ICT-FaceKit's axes (y up, facing +z) to Anny's (z up, facing -y)."""
@@ -71,7 +84,8 @@ class Avatar(ArrayRecord):
     faces: np.ndarray
     """``(F, 3)`` triangles."""
     face_parts: np.ndarray
-    """``(F,)`` each triangle's part: ``BODY``, ``HANDS``, ``HEAD_SKIN``, ``MOUTH`` or ``EYES``."""
+    """``(F,)`` each triangle's part: ``BODY``, ``HANDS``, ``HEAD_SKIN``, ``MOUTH``, ``EYES``,
+    ``GENITALS`` or ``CANALS``."""
     uvs: np.ndarray
     """``(F, 3, 2)`` texture coordinates of the triangles' corners, in [0, 1] with v up."""
     face_textures: np.ndarray
@@ -87,11 +101,11 @@ class Avatar(ArrayRecord):
     bind_poses: np.ndarray
     """``(J, 4, 4)`` bone frames in the rest pose."""
     head_start: int
-    """Index of the first head vertex; the head's vertices run to the end."""
+    """Index of the first head vertex. The head's vertices follow, then the genitals'."""
     expression_names: np.ndarray
-    """``(E,)`` ARKit-style expression names."""
+    """``(E,)`` ARKit-style expression names, then the genitals' shapes."""
     expression_basis: np.ndarray
-    """``(E, V - head_start, 3)`` head vertex offsets of each expression at weight 1."""
+    """``(E, V - head_start, 3)`` offsets of the vertices from the head's on, at weight 1."""
 
 
 class Rig(torch.nn.Module):
@@ -167,13 +181,16 @@ def build_avatar(
     """Join the fitted body and head, placed on it, into one rigged, textured mesh."""
     device = body.faces.device
     bind_poses = body_rest["bind_poses"]
-    body_rest = body_rest["vertices"]
+    body_rest_all, body_rest = body_rest, body_rest["vertices"]
     head = head.to(device)
     scale, rotation = placement.scale, placement.rotation
     head_world = placement.apply(head_rest)
     seam = head_world[head.landmarks[ICT_CHIN], 2] - config.neck_seam
 
-    body_kept = ~_above(body.faces, body_rest, seam)
+    insert = build_insert(body, body_rest_all, config.genitals)
+    body_rest = body_rest.clone()
+    body_rest[insert.border] = insert.border_vertices
+    body_kept = ~_above(body.faces, body_rest, seam) & ~insert.removed
     body_kept &= ~body.head_faces | (body_rest[body.faces][..., 2].amax(dim=1) <= seam)
     head_kept = head_world[head.faces][..., 2].amin(dim=1) >= seam
     body_faces, head_faces = body.faces[body_kept], head.faces[head_kept]
@@ -192,13 +209,22 @@ def build_avatar(
     bridge_vertices = torch.cat((body_rest[body_loop], head_world[head_loop]))[bridge]
     bridge_uvs = _surface_uvs(bridge_vertices, body, body_rest, neck)
 
-    vertices = torch.cat((body_rest[kept], head_world))
-    faces = torch.cat((remap[body_faces], ends[bridge], head_faces + len(kept)))
+    insert_start = len(kept) + len(head_world)
+    insert_faces = torch.where(
+        insert.faces < len(body_rest),
+        remap[insert.faces.clamp_max(len(body_rest) - 1)],
+        insert.faces - len(body_rest) + insert_start,
+    )
+    if (insert_faces < 0).any():
+        raise ValueError("the genitals are stitched to vertices of Anny's that were cut away")
+    vertices = torch.cat((body_rest[kept], head_world, insert.vertices))
+    faces = torch.cat((remap[body_faces], ends[bridge], head_faces + len(kept), insert_faces))
     vertices = _smooth_seam(vertices, faces, ends)
 
     k = config.max_bone_influences
     body_bones, body_weights = sparsify_weights(body.skin_weights[kept], k)
     head_bones, head_weights = sparsify_weights(transfer_weights(body, body_rest, head_world), k)
+    insert_bones, insert_weights = sparsify_weights(insert.weights, k)
 
     parts = torch.full((len(head_faces),), HEAD_SKIN, device=device)
     parts[head_faces.min(dim=1).values >= ict.MOUTH_INTERIOR.start] = MOUTH
@@ -207,30 +233,105 @@ def build_avatar(
     body_parts = torch.full((on_body,), BODY, device=device)
     body_parts[: len(body_faces)][body.hand_faces[body_kept]] = HANDS
 
-    expression_basis = scale * head.expression_basis @ rotation.T
+    expressions = scale * head.expression_basis @ rotation.T
+    count = len(head_world) + len(insert.vertices)
+    expression_basis = torch.zeros(len(expressions) + len(insert.shapes), count, 3, device=device)
+    expression_basis[: len(expressions), : len(head_world)] = expressions
+    expression_basis[len(expressions) :, len(head_world) :] = insert.shapes
+    insert_parts = torch.where(insert.inside, CANALS, GENITALS)
+    insert_parts[insert.on_body_texture] = BODY
+    head_uvs = head.uvs[head_kept].clone()
+    head_uvs[..., 0] *= ict.UV_TILES / ATLAS_TILES
+    insert_uvs = insert.uvs.clone()
+    atlas = ~insert.on_body_texture
+    insert_uvs[atlas, :, 0] = (ict.UV_TILES + insert_uvs[atlas, :, 0]) / ATLAS_TILES
     logger.info(
-        "avatar: %d body and %d head vertices, head scaled by %.3f, %d triangles at the neck",
+        "avatar: %d body, %d head and %d genital vertices, head scaled by %.3f, "
+        "%d triangles at the neck",
         len(kept),
         len(head_world),
+        len(insert.vertices),
         scale,
         len(bridge),
     )
     return Avatar(
         rest_vertices=vertices.cpu().numpy(),
         faces=faces.cpu().numpy(),
-        face_parts=torch.cat((body_parts, parts)).to(torch.int8).cpu().numpy(),
-        uvs=torch.cat((body.uvs[body_kept], bridge_uvs, head.uvs[head_kept])).cpu().numpy(),
-        face_textures=np.repeat(
-            np.array([BODY_TEXTURE, HEAD_TEXTURE], np.int8), [on_body, len(head_faces)]
-        ),
-        bone_indices=torch.cat((body_bones, head_bones)).cpu().numpy(),
-        bone_weights=torch.cat((body_weights, head_weights)).cpu().numpy(),
+        face_parts=torch.cat((body_parts, parts, insert_parts)).to(torch.int8).cpu().numpy(),
+        uvs=torch.cat((body.uvs[body_kept], bridge_uvs, head_uvs, insert_uvs)).cpu().numpy(),
+        face_textures=np.concatenate(
+            (
+                np.repeat(
+                    np.array([BODY_TEXTURE, HEAD_TEXTURE], np.int8), [on_body, len(head_faces)]
+                ),
+                np.where(insert.on_body_texture.cpu().numpy(), BODY_TEXTURE, HEAD_TEXTURE),
+            )
+        ).astype(np.int8),  # fmt: skip
+        bone_indices=torch.cat((body_bones, head_bones, insert_bones)).cpu().numpy(),
+        bone_weights=torch.cat((body_weights, head_weights, insert_weights)).cpu().numpy(),
         bone_labels=np.array(body.bone_labels),
         bone_parents=np.array(body.bone_parents),
         bind_poses=bind_poses.cpu().numpy(),
         head_start=len(kept),
-        expression_names=np.array(head.expression_names),
+        expression_names=np.array(head.expression_names + insert.shape_names),
         expression_basis=expression_basis.cpu().numpy(),
+    )
+
+
+def subdivide(avatar: Avatar, max_bone_influences: int) -> Avatar:
+    """The avatar with each triangle split in four and its surface smoothed (Loop subdivision):
+    positions, skinning weights and expression blendshapes all follow the same smoothing, texture
+    coordinates are split linearly. New vertices between head vertices are head vertices."""
+    faces = torch.from_numpy(avatar.faces).long()
+    num_vertices = len(avatar.rest_vertices)
+    split, matrix = loop_subdivision(faces, num_vertices)
+
+    head_start = avatar.head_start
+    edges, _ = unique_edges(faces)
+    on_head = torch.cat((torch.arange(num_vertices) >= head_start, (edges >= head_start).all(1)))
+    order = torch.cat((torch.nonzero(~on_head).squeeze(-1), torch.nonzero(on_head).squeeze(-1)))
+    position = torch.empty_like(order)
+    position[order] = torch.arange(len(order))
+
+    def smoothed(values: torch.Tensor) -> torch.Tensor:
+        return (matrix @ values.reshape(num_vertices, -1)).reshape(-1, *values.shape[1:])[order]
+
+    dense = torch.zeros(num_vertices, len(avatar.bone_labels))
+    dense.scatter_(
+        1, torch.from_numpy(avatar.bone_indices).long(), torch.from_numpy(avatar.bone_weights)
+    )
+    bone_indices, bone_weights = sparsify_weights(smoothed(dense), max_bone_influences)
+    basis = torch.from_numpy(avatar.expression_basis)
+    full_basis = torch.zeros(num_vertices, len(basis), 3)
+    full_basis[head_start:] = basis.permute(1, 0, 2)
+    new_head_start = int((~on_head).sum())
+
+    uvs = torch.from_numpy(avatar.uvs)
+    a, b, c = uvs.unbind(1)
+    ab, bc, ca = (a + b) / 2, (b + c) / 2, (c + a) / 2
+    split_uvs = torch.stack(
+        (
+            torch.stack((a, ab, ca), 1),
+            torch.stack((ab, b, bc), 1),
+            torch.stack((ca, bc, c), 1),
+            torch.stack((ab, bc, ca), 1),
+        ),
+        dim=1,
+    ).reshape(-1, 3, 2)
+    return Avatar(
+        rest_vertices=smoothed(torch.from_numpy(avatar.rest_vertices)).numpy(),
+        faces=position[split].numpy(),
+        face_parts=np.repeat(avatar.face_parts, 4),
+        uvs=split_uvs.numpy(),
+        face_textures=np.repeat(avatar.face_textures, 4),
+        bone_indices=bone_indices.numpy(),
+        bone_weights=bone_weights.numpy(),
+        bone_labels=avatar.bone_labels,
+        bone_parents=avatar.bone_parents,
+        bind_poses=avatar.bind_poses,
+        head_start=new_head_start,
+        expression_names=avatar.expression_names,
+        expression_basis=smoothed(full_basis)[new_head_start:].permute(1, 0, 2).numpy(),
     )
 
 

@@ -1,5 +1,9 @@
 """Fitting the ICT-FaceKit head to the head videos: one identity shared by both videos, and a
-rigid head pose and an expression per frame."""
+rigid head pose, an expression and a gaze per frame.
+
+ICT-FaceKit's ``eyeLook`` blendshapes move the eyelids, not the eyeballs, so the eyes are turned
+apart, to put the pupils on MediaPipe's iris centres. Unturned, every frame paints the iris onto a
+different patch of the eyeball, and baked from all of them it turns into a grey smear."""
 
 from __future__ import annotations
 
@@ -36,7 +40,7 @@ turns, so they count less."""
 JAWLINE_WEIGHT = 0.3
 CHIN = 8
 LEFT_IRIS, RIGHT_IRIS, NOSE_TIP = 473, 468, 4
-"""MediaPipe landmarks used to place the head before fitting."""
+"""MediaPipe landmarks used to place the head before fitting; the irises also aim the eyes."""
 ICT_NOSE_TIP = 30
 
 ICT_TO_WORLD = torch.tensor([[1.0, 0, 0], [0, 0, -1], [0, 1, 0]])
@@ -48,7 +52,8 @@ class HeadFit(ArrayRecord):
     """The head model's parameters for every frame of one head video.
 
     A frame's head is ``rotation @ ICT_TO_WORLD @ (vertices - centre) + translation``, with the
-    vertices of the head model for ``identity`` and that frame's ``expressions``.
+    vertices of the head model for ``identity`` and that frame's ``expressions`` and
+    ``eye_rotations``.
     """
 
     frame_indices: np.ndarray
@@ -56,6 +61,9 @@ class HeadFit(ArrayRecord):
     """``(I,)`` identity weights, shared by all head videos."""
     expressions: np.ndarray
     """``(N, E)`` expression weights in [0, 1]."""
+    eye_rotations: np.ndarray
+    """``(N, 2, 3)`` rotation vectors of the eyeballs about their centres, in the head model's
+    axes, in ``ict.EYEBALL_ORDER``."""
     rotations: np.ndarray
     """``(N, 3)`` head rotation vectors in world axes."""
     translations: np.ndarray
@@ -78,17 +86,18 @@ def head_vertices(
     model: IctFaceKit,
     identity: torch.Tensor,
     expressions: torch.Tensor,
+    eye_rotations: torch.Tensor,
     rotations: torch.Tensor,
     translations: torch.Tensor,
     centre: torch.Tensor,
 ) -> torch.Tensor:
-    """``(N, V, 3)`` world vertices of the head for per-frame expressions and poses."""
-    local = model(identity, expressions) - centre
+    """``(N, V, 3)`` world vertices of the head for per-frame expressions, gazes and poses."""
+    local = ict.turn_eyes(model(identity, expressions), eye_rotations) - centre
     rotation = roma.rotvec_to_rotmat(rotations) @ ICT_TO_WORLD.to(local)
     return local @ rotation.transpose(-1, -2) + translations.unsqueeze(-2)
 
 
-class _VideoParameters(torch.nn.Module):
+class VideoParameters(torch.nn.Module):
     def __init__(self, yaw: np.ndarray, translation: torch.Tensor, num_expressions: int):
         super().__init__()
         frames = len(yaw)
@@ -97,9 +106,14 @@ class _VideoParameters(torch.nn.Module):
         self.rotations = torch.nn.Parameter(rotations)
         self.translations = torch.nn.Parameter(translation.float().expand(frames, 3).clone())
         self.expression_logits = torch.nn.Parameter(torch.full((frames, num_expressions), -5.0))
+        self.eye_angles = torch.nn.Parameter(torch.zeros(frames, 2, 2))
+        """Per eye, the turn up or down (about the head model's x) and sideways (about its y)."""
 
     def expressions(self) -> torch.Tensor:
         return torch.sigmoid(self.expression_logits)
+
+    def eye_rotations(self) -> torch.Tensor:
+        return F.pad(self.eye_angles, (0, 1))
 
 
 @dataclass
@@ -109,20 +123,31 @@ class _Video:
     camera: Camera
     scale: float
     masks: torch.Tensor
+    compared: torch.Tensor
+    """``(N, H, W)`` 1 where the silhouette is compared, 0 on ``Preprocessed.ignored``."""
     landmarks: torch.Tensor
     landmark_weights: torch.Tensor
-    params: _VideoParameters
+    irises: torch.Tensor
+    """``(N, 2, 2)`` iris centres in pixels, in ``ict.EYEBALL_ORDER``."""
+    found: torch.Tensor
+    """``(N,)`` float: 1 where MediaPipe found the face."""
+    params: VideoParameters
 
 
 def fit_heads(
     videos: dict[str, tuple[Preprocessed, tuple[int, int]]],
     model: IctFaceKit,
     config: FittingConfig,
+    outlier_factor: float | None = None,
 ) -> dict[str, HeadFit]:
     """Fit one head identity and per-frame poses and expressions to several head videos.
 
     Args:
         videos: per video name, its preprocessing results and its image size.
+        outlier_factor: after the first phase (the head placed rigidly on the landmarks),
+            faces whose landmarks it misses by more than this many times the median over every
+            video are left out of the rest: MediaPipe fits its mesh badly to faces seen from
+            below or far turned, and the identity would bend to them. None: all are kept.
     """
     device = config.device
     model = model.to(device)
@@ -134,6 +159,7 @@ def fit_heads(
     radius = samples.radius
     inset = config.silhouette_inset * radius
     landmark_vertices = model.landmarks.to(device)
+    pupils = model.pupils().to(device)
 
     fits = {
         name: _prepare(pre, size, model, centre, config) for name, (pre, size) in videos.items()
@@ -141,12 +167,15 @@ def fit_heads(
 
     def pose(video: _Video) -> torch.Tensor:
         p = video.params
-        return head_vertices(model, identity, p.expressions(), p.rotations, p.translations, centre)
+        return head_vertices(
+            model, identity, p.expressions(), p.eye_rotations(), p.rotations, p.translations, centre
+        )
 
     def chin_region(video: _Video, vertices: torch.Tensor) -> torch.Tensor:
         chin = video.camera.project(vertices[:, landmark_vertices[CHIN]])[:, 1].detach()
         rows = torch.arange(video.camera.height, device=device).float()
-        return (rows[None, :] < chin[:, None]).float()[:, :, None].expand_as(video.masks)
+        above = (rows[None, :] < chin[:, None]).float()[:, :, None]
+        return above * video.compared
 
     def loss(phase: int) -> dict[str, torch.Tensor]:
         terms: dict[str, torch.Tensor] = {}
@@ -173,15 +202,32 @@ def fit_heads(
                 terms[f"{name} sparsity"] = (
                     config.expression_sparsity_weight * p.expressions().sum(-1).mean()
                 )
+                terms[f"{name} irises"] = config.keypoint_weight * keypoint_loss(
+                    video.camera.project(vertices[:, pupils]),
+                    video.irises,
+                    video.found[:, None] * facing(vertices, pupils).detach(),
+                    video.camera.height,
+                )
+                terms[f"{name} gaze"] = (
+                    config.gaze_prior_weight * p.eye_angles.square().sum((1, 2)).mean()
+                    + config.smoothness_weight
+                    * second_difference(p.eye_angles).square().sum((1, 2)).mean()
+                )
         terms["identity prior"] = config.identity_prior_weight * identity.square().sum()
         return terms
 
     rigid = [
         p for video in fits.values() for p in (video.params.rotations, video.params.translations)
     ]
-    expression = [video.params.expression_logits for video in fits.values()]
+    expression = [
+        p
+        for video in fits.values()
+        for p in (video.params.expression_logits, video.params.eye_angles)
+    ]
     phases = (rigid, rigid + [identity], rigid + [identity] + expression)
     for phase, (iterations, trainable) in enumerate(zip(config.iterations, phases, strict=True)):
+        if phase == 1 and outlier_factor is not None:
+            _drop_outliers(fits, pose, landmark_vertices, outlier_factor)
         optimizer = torch.optim.Adam(trainable, lr=config.learning_rate)
         for iteration in range(iterations):
             terms = loss(phase)
@@ -210,6 +256,7 @@ def fit_heads(
                 frame_indices=video.preprocessed.frame_indices,
                 identity=identity[0].cpu().numpy(),
                 expressions=p.expressions().cpu().numpy(),
+                eye_rotations=p.eye_rotations().cpu().numpy(),
                 rotations=p.rotations.cpu().numpy(),
                 translations=p.translations.cpu().numpy(),
                 centre=centre.cpu().numpy(),
@@ -219,6 +266,29 @@ def fit_heads(
                 landmark_error=torch.where(found, distance, torch.nan).cpu().numpy(),
             )
     return results
+
+
+@torch.no_grad()
+def _drop_outliers(fits: dict[str, _Video], pose, landmark_vertices, factor: float) -> None:
+    """Leave out the faces whose landmarks the current fit misses by more than ``factor``
+    times the median miss over all videos' faces (in image heights)."""
+    misses = {}
+    for name, video in fits.items():
+        projected = video.camera.project(pose(video)[:, landmark_vertices])
+        distance = (projected - video.landmarks).norm(dim=-1).mean(-1) / video.camera.height
+        found = video.landmark_weights.sum(-1) > 0
+        misses[name] = torch.where(found, distance, torch.nan)
+    median = torch.cat(list(misses.values())).nanmedian()
+    for name, video in fits.items():
+        bad = misses[name] > factor * median
+        if bad.any():
+            video.landmark_weights[bad] = 0
+            video.found[bad] = 0
+            logger.info(
+                "head video %s: %d of %d faces left out, their landmarks missed by more than "
+                "%.1f times the median", name, int(bad.sum()), int((misses[name] >= 0).sum()),
+                factor,
+            )  # fmt: skip
 
 
 def _prepare(
@@ -235,22 +305,91 @@ def _prepare(
 
     masks = torch.from_numpy(preprocessed.masks).to(device).float()
     masks = F.interpolate(masks[:, None], (camera.height, camera.width), mode="area")[:, 0]
+    compared = torch.ones_like(masks)
+    if preprocessed.ignored is not None:
+        ignored = torch.from_numpy(preprocessed.ignored).to(device).float()
+        ignored = F.interpolate(ignored[:, None], (camera.height, camera.width), mode="area")
+        compared = (ignored[:, 0] < 0.5).float()
+    targets = landmark_targets(preprocessed.face_landmarks, scale, model, device)
+    params = initial_parameters(
+        preprocessed.face_landmarks, targets, camera, model, centre, config.eye_distance
+    )
+    return _Video(
+        preprocessed, image_size, camera, scale, masks, compared, targets.landmarks,
+        targets.weights, targets.irises, targets.found, params,
+    )  # fmt: skip
 
-    mediapipe = torch.from_numpy(preprocessed.face_landmarks).float().to(device) * scale
+
+@dataclass
+class LandmarkTargets:
+    """What a video's MediaPipe face landmarks ask of the head model, scaled to the fitting
+    resolution."""
+
+    mediapipe: torch.Tensor
+    """``(N, 478, 3)`` the landmarks in pixels, NaN where no face was found."""
+    landmarks: torch.Tensor
+    """``(N, 68, 2)`` pixels: MediaPipe's counterparts of the head model's 68 landmarks."""
+    weights: torch.Tensor
+    """``(N, 68)`` how much each landmark counts; zero throughout where no face was found."""
+    irises: torch.Tensor
+    """``(N, 2, 2)`` iris centres in pixels, in ``ict.EYEBALL_ORDER``."""
+    found: torch.Tensor
+    """``(N,)`` float: 1 where MediaPipe found the face."""
+
+
+def landmark_targets(
+    face_landmarks: np.ndarray, scale: float, model: IctFaceKit, device: str
+) -> LandmarkTargets:
+    """The head model's landmark targets from ``(N, 478, 3)`` MediaPipe landmarks in pixels, for
+    images scaled by ``scale``."""
+    mediapipe = torch.from_numpy(face_landmarks).float().to(device) * scale
     found = ~mediapipe.isnan().any(dim=-1).any(dim=-1)
     landmarks = torch.nan_to_num(mediapipe[:, MEDIAPIPE_TO_MULTIPIE, :2])
     weights = torch.ones(68, device=device)
     weights[JAWLINE] = JAWLINE_WEIGHT
     weights = weights * found[:, None]
 
-    yaw = head_yaw(preprocessed.face_landmarks)
-    first = int(found.float().argmax())
-    eyes = mediapipe[first, [LEFT_IRIS, RIGHT_IRIS], :2]
-    depth = camera.depth_for_height(config.eye_distance, float((eyes[0] - eyes[1]).norm()))
-    nose = camera.unproject(mediapipe[first, NOSE_TIP, :2], depth)
-    rotation = roma.rotvec_to_rotmat(torch.tensor([0, 0, float(yaw[first])], device=device))
-    nose_offset = (
-        rotation @ ICT_TO_WORLD.to(device) @ (model.neutral[model.landmarks[ICT_NOSE_TIP]] - centre)
+    left_first = (
+        model.neutral[ict.LEFT_EYEBALL, 0].mean() > model.neutral[ict.RIGHT_EYEBALL, 0].mean()
     )
-    params = _VideoParameters(yaw, nose - nose_offset, model.num_expressions).to(device)
-    return _Video(preprocessed, image_size, camera, scale, masks, landmarks, weights, params)
+    iris_landmarks = [LEFT_IRIS, RIGHT_IRIS] if left_first else [RIGHT_IRIS, LEFT_IRIS]
+    irises = torch.nan_to_num(mediapipe[:, iris_landmarks, :2])
+    return LandmarkTargets(mediapipe, landmarks, weights, irises, found.float())
+
+
+def initial_parameters(
+    face_landmarks: np.ndarray,
+    targets: LandmarkTargets,
+    camera: Camera,
+    model: IctFaceKit,
+    centre: torch.Tensor,
+    eye_distance: float,
+) -> VideoParameters:
+    """Parameters starting from the turntable's yaw per frame, the head at the distance its
+    eyes' spacing implies, and a neutral face."""
+    mediapipe = targets.mediapipe
+    yaw = head_yaw(face_landmarks)
+    first = int(targets.found.argmax())
+    eyes = mediapipe[first, [LEFT_IRIS, RIGHT_IRIS], :2]
+    depth = camera.depth_for_height(eye_distance, float((eyes[0] - eyes[1]).norm()))
+    nose = camera.unproject(mediapipe[first, NOSE_TIP, :2], depth)
+    rotation = roma.rotvec_to_rotmat(
+        torch.tensor([0, 0, float(yaw[first])], device=mediapipe.device)
+    )
+    nose_offset = (
+        rotation
+        @ ICT_TO_WORLD.to(mediapipe.device)
+        @ (model.neutral[model.landmarks[ICT_NOSE_TIP]] - centre)
+    )
+    return VideoParameters(yaw, nose - nose_offset, model.num_expressions).to(mediapipe.device)
+
+
+def facing(vertices: torch.Tensor, pupils: torch.Tensor) -> torch.Tensor:
+    """``(N, 2)`` how squarely the camera at the origin sees each eye: the cosine between the
+    eyeball's forward direction and the direction to the camera, zero when it looks away.
+    MediaPipe guesses an eye it sees from the side or not at all."""
+    centres = torch.stack(
+        [vertices[:, eyeball].mean(dim=1) for eyeball in ict.EYEBALL_ORDER], dim=1
+    )
+    forward = F.normalize(vertices[:, pupils] - centres, dim=-1)
+    return (forward * F.normalize(-vertices[:, pupils], dim=-1)).sum(-1).clamp_min(0)

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from avatar_splats.body_models.mesh import vertex_normals
 from avatar_splats.cameras import Camera
 from avatar_splats.rendering.rasterize import Fragments, rasterize
 
@@ -68,3 +69,17 @@ def render_mesh(
     image = fragments.image(colours)
     image = torch.where(mask.unsqueeze(-1), image, background)
     return MeshImage(image, mask.float(), fragments.depth_image())
+
+
+def render_shaded(vertices: torch.Tensor, faces: torch.Tensor, camera: Camera) -> torch.Tensor:
+    """``(H, W, 3)`` a mesh in plain grey, lit from the camera, on white: to judge its shape.
+
+    Normals are smoothed over the vertices; both sides of a triangle are lit alike.
+    """
+    fragments = rasterize(camera.screen(vertices), faces, camera.width, camera.height)
+    normals = F.normalize(fragments.interpolate(vertex_normals(vertices, faces)[faces]), dim=-1)
+    points = fragments.interpolate(vertices[faces])
+    towards = F.normalize(camera.position - points, dim=-1)
+    light = (normals * towards).sum(-1, keepdim=True).abs()
+    grey = 0.2 + 0.75 * light.expand(-1, 3)
+    return fragments.image(grey, 1.0)

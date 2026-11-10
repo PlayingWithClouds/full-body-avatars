@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import AnimationPanel from '#lib/animation/AnimationPanel.svelte';
 	import { readAvatar } from '#lib/avatar/file.ts';
+	import FacesPanel from '#lib/faces/FacesPanel.svelte';
+	import HairPanel from '#lib/hair/HairPanel.svelte';
 	import { JOINTS, PRESETS, rotations } from '#lib/avatar/poses.ts';
 	import { AvatarViewer, type Stats } from '#lib/render/viewer.ts';
 
@@ -8,6 +11,8 @@
 	const BACKGROUNDS = ['#ffffff', '#9ca3af', '#18181b', '#000000'];
 
 	let canvas: HTMLCanvasElement;
+	let animation: AnimationPanel | undefined = $state();
+	let faces: FacesPanel | undefined = $state();
 	let viewer: AvatarViewer | undefined = $state();
 	let status = $state('Drop an .avatar file here, or open one.');
 	let loading = $state(false);
@@ -18,6 +23,8 @@
 	let showGaussians = $state(true);
 	let viewDependent = $state(true);
 	let antialias = $state(false);
+	let hasLighting = $state(false);
+	let lit = $state(true);
 	let background = $state(BACKGROUNDS[0]);
 	let joints: Record<string, number> = $state({});
 	let expressionNames: string[] = $state([]);
@@ -46,6 +53,7 @@
 			viewer?.dispose();
 			viewer = new AvatarViewer(canvas, file);
 			fileName = name;
+			hasLighting = file.metadata.lighting !== undefined;
 			expressionNames = file.metadata.expressions;
 			expressions = expressionNames.map(() => 0);
 			joints = {};
@@ -65,8 +73,17 @@
 	function drop(event: DragEvent) {
 		event.preventDefault();
 		dragging = false;
-		const file = event.dataTransfer?.files[0];
-		if (file) load(file, file.name);
+		for (const file of event.dataTransfer?.files ?? []) {
+			if (file.name.endsWith('.faces.json')) faces?.loadFaces(file, file.name);
+			else if (file.name.endsWith('.motion')) animation?.loadMotion(file, file.name);
+			else if (file.name.endsWith('.json')) animation?.loadSequence(file, file.name);
+			else load(file, file.name);
+		}
+	}
+
+	/** Back to posing the avatar with the sliders. */
+	function poseByHand() {
+		viewer?.pose(rotations(joints), Float32Array.from(expressions));
 	}
 
 	function applyPreset(name: string) {
@@ -85,6 +102,9 @@
 	$effect(() => {
 		viewer?.setSplatOptions({ viewDependent, antialias });
 	});
+	$effect(() => {
+		viewer?.setLit(lit);
+	});
 
 	let statsTimer: ReturnType<typeof setInterval>;
 	onMount(() => {
@@ -97,7 +117,19 @@
 		const source = params.get('src') ?? DEFAULT_SOURCE;
 		fetch(source, { method: 'HEAD' })
 			.then((response) => {
-				if (response.ok) load(source, source.split('/').pop() ?? source);
+				if (!response.ok) return;
+				// Motion clips named in `?motion=a.motion,b.motion` play once the avatar is in, and a
+				// sequence named in `?sequence=s.json` runs after them.
+				return load(source, source.split('/').pop() ?? source).then(async () => {
+					for (const motion of params.get('motion')?.split(',') ?? []) {
+						await animation?.loadMotion(motion, motion.split('/').pop() ?? motion);
+					}
+					const sequence = params.get('sequence');
+					if (sequence) await animation?.loadSequence(sequence, sequence.split('/').pop()!);
+					// The faces of a video, `?faces=/faces/head_expressions.faces.json`, in a grid.
+					const grid = params.get('faces');
+					if (grid) await faces?.loadFaces(grid, grid.split('/').pop() ?? grid);
+				});
 			})
 			.catch(() => {});
 		statsTimer = setInterval(() => (stats = viewer?.stats()), 500);
@@ -181,6 +213,14 @@
 					>
 						<input type="checkbox" bind:checked={antialias} class="accent-sky-500" /> Antialias
 					</label>
+					{#if hasLighting}
+						<label
+							class="flex items-center gap-2 text-sm"
+							title="Light the skin's albedo with the light learned from the videos, or show it unlit"
+						>
+							<input type="checkbox" bind:checked={lit} class="accent-sky-500" /> Lighting
+						</label>
+					{/if}
 				</div>
 				<div class="flex items-center gap-2">
 					<span class="text-sm text-zinc-400">Background</span>
@@ -204,6 +244,12 @@
 					Reset camera
 				</button>
 			</section>
+
+			<AnimationPanel bind:this={animation} {viewer} onstop={poseByHand} />
+
+			<FacesPanel bind:this={faces} {viewer} />
+
+			<HairPanel {viewer} />
 
 			<section class="space-y-3">
 				<div class="flex items-baseline justify-between">

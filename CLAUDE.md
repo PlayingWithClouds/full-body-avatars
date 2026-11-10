@@ -43,7 +43,8 @@ engine. Built from three turntable videos; the performer is under contract with 
 
 All stages run end to end (`go-task pipeline`); the README explains each. Outputs:
 `outputs/preprocess/<video>.npz`, `outputs/fitting/{body,head_static,head_expressions,avatar}.npz`,
-`outputs/training/{gaussians,textures,colours,evaluation}.npz`, `outputs/export/performer.avatar`.
+`outputs/training/{gaussians,textures,colours,evaluation}.npz`, `outputs/export/performer.avatar`;
+the faces stage, `outputs/faces/<head video>.{npz,faces.json,faces.jpg}` (the avatar's face per frame from the video's calibrated MediaPipe blendshapes, refined on the 468 mesh landmarks, with the video's crops: `go-task faces`; the viewer shows it as a grid of heads beside the avatar, `?faces=`); the motion stage, run on any video, `outputs/motion/<name>/{observations,fit,clip}.npz`.
 
 Conventions every stage relies on:
 
@@ -65,7 +66,8 @@ keypoints ~14 px; head IoU ~0.97, landmarks ~20 px; the head turntable's last fr
 degrees. The FOV (30°) is a guess for generated videos and is not fitted.
 
 Known gaps: one eye-level orbit leaves the top of the head, soles, armpits, inner thighs and
-crotch barely seen (they get filled-in texture, no Gaussians); Anny has no genital anatomy; fingers are posed once for the whole video, from MediaPipe
+crotch barely seen (they get filled-in texture, no Gaussians); Anny has no genital anatomy, so it is
+generated (`body_models/genitals.py`), not fitted; fingers are posed once for the whole video, from MediaPipe
 hand landmarks; the Gaussian count is fixed (no densification); the browser viewer in `viewer/` is
 the closest thing to an engine-side renderer so far.
 
@@ -100,9 +102,28 @@ Lessons from earlier runs:
 `viewer/` (SvelteKit 3, Svelte 5, Tailwind 4, three.js; bun) renders `.avatar` files as the game
 should: CPU skinning on pose changes, the textured mesh, then Gaussians placed on their triangles
 in a vertex shader, each hidden whole by the mesh's depth at its centre (as training does; a
-per-pixel test cuts splats along slanted skin), sorted back to front by their true centres.
-`go-task viewer` serves it with the exported avatar; `.avatar` files in `viewer/static/` are
-gitignored. three.js needs splat quads drawn double-sided: their winding follows the ellipse.
+per-pixel test cuts splats along slanted skin), sorted back to front by their true centres. The
+eyeballs have their own material (`lib/render/eyes.ts`): a procedural iris in the colour and
+size `export/eyes.py` measured, the sclera, a glossy cornea; they get no Gaussians and their
+baked texture is unused. The studio light the viewer shades with is `lib/render/lighting.ts`.
+Lashes and brows are strands bound to skin triangles (`export/face_hair.py`: lashes along
+ICT-FaceKit's lash cards, brows where the baked texture shows them), drawn by
+`lib/render/face_hair.ts`. The inside of the mouth (teeth, gums, tongue, socket, the lips' inner
+side) is drawn with stock materials by region (`export/mouth.py`, `lib/render/mouth.ts`), and
+`jawOpen` brings the lower teeth up and forward so they show over her full lower lip.
+Format 4 files may have no Gaussians (the mesh alone), and may carry a learned light
+(`metadata.lighting`, 9 RGB spherical-harmonic coefficients over world-axis normals; the skin
+textures then hold albedo) and wrinkle maps (`metadata.wrinkles`, `wrinkle_textures`: signed albedo
+detail on the head texture, weighted by expressions); `lib/render/skin.ts` draws both, the light
+toggled in the page.
+`go-task viewer` serves it with the exported avatar and the motion clips
+(`?motion=/motion/<name>/<name>.motion`, or drop `.motion` files on it); `.avatar` files and
+`viewer/static/motion` are gitignored. Clips play on one copy of the avatar per person, all
+copies' Gaussians in one sorted draw; switching clips crossfades and can carry the people on
+from where they stand (`lib/animation/player.ts`). Scripted sequences are JSON (format in
+`lib/animation/sequence.ts`): steps (clips, trimmed, sped up or repeated; held pose presets;
+waits) and timed cues layered over them (expressions, gaze, camera); `?sequence=<url>` or drop the
+`.json` on the viewer. `bun test` runs the viewer's tests. three.js needs splat quads drawn double-sided: their winding follows the ellipse.
 
 ## Commands
 
@@ -119,6 +140,7 @@ go-task preprocess   # or: go-task preprocess -- body
 go-task fit          # ~3 min
 go-task train        # ~5 min for 20k steps
 go-task export
+go-task motion -- video.mp4  # motion clip from a video of one or more people
 go-task viewer       # http://localhost:5173
 ```
 

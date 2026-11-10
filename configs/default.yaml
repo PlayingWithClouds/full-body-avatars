@@ -6,6 +6,18 @@ capture:
 
 outputs: ../outputs
 
+performer:
+  measurements:  # weight in kg, circumferences in metres (34-24-35 in); height: fitting.body_height
+    weight: 54.0
+    bust: 0.864
+    waist: 0.610
+    hips: 0.889
+    foot: 0.230  # EU 36.5
+  phenotype:  # Anny values held through the fit; gender 1 is female, 0 male
+    gender: 1.0
+    cupsize: 0.65  # chosen by eye against frames: no measurement tells the breasts' shape
+    firmness: 0.3
+
 preprocess:
   frame_step: 1
   device: cuda
@@ -20,12 +32,23 @@ body_models:
   max_bone_influences: 8
   neck_seam: 0.04
   neck_blend: 0.03
+  subdivisions: 0
+  genitals:
+    resolution: 0.002
+    vagina_depth: 0.10
+    anus_depth: 0.12
+    open_radius: 0.015  # wider runs onto the inner thighs in the rest pose
+    sculpt: ../assets/genitals/vagina.stl
+    sculpt_midline: 90.0
+    sculpt_back: 92.5
+    sculpt_front: 119.0
+    sculpt_introitus: 99.6
 
 fitting:
   device: cuda
   resolution: 512
   fov_y_degrees: 30
-  body_height: 1.65  # the performer's real height sets the avatar's scale
+  body_height: 1.68  # the performer's real height sets the avatar's scale
   height_weight: 10.0
   eye_distance: 0.063
   surface_samples: 120000
@@ -35,11 +58,12 @@ fitting:
   keypoint_weight: 1.0
   hand_weight: 0.5
   silhouette_weight: 1.0
-  pose_prior_weight: 0.01
+  pose_prior_weight: 0.002
   smoothness_weight: 1.0
   local_change_weight: 0.01
-  identity_prior_weight: 0.001
+  identity_prior_weight: 0.002
   expression_sparsity_weight: 0.001
+  gaze_prior_weight: 0.002
 
 training:
   device: cuda
@@ -49,9 +73,16 @@ training:
   hand_density: 0.0  # fingers are posed once per video and never match exactly: Gaussians smear
   coverage_range: [0.3, 0.6]
   occlusion_margin: 0.25
+  align_rounds: 4
+  align_steps: 2000
+  align_resolution: 512
+  align_silhouette_weight: 1.0
   rebake_every: 2500
   body_texture_size: 2048
   head_texture_size: 1024
+  fallback_videos: [head_expressions]  # neutral only in its first 4 frames
+  detail_scale: 8.0  # at 2, creases, folds and the ears' shape were averaged away
+  seam_weight: 0.25
   sh_degree: 0  # one colour per Gaussian: a single eye-level orbit cannot teach view-dependent colour
   iterations: 20000
   holdout_every: 10
@@ -67,7 +98,7 @@ training:
   thickness: 0.0002
   max_size: 0.006
   max_elongation: 4.0
-  pose_prior_weight: 0.01
+  pose_prior_weight: 0.002
   learning_rates:
     offsets: 0.001
     rotations: 0.001
@@ -77,3 +108,49 @@ training:
     sh_rest: 0.000125
     colours: 0.0005
     poses: 0.0005
+
+motion:
+  device: cuda
+  frame_step: 1
+  max_people: 2
+  detection_threshold: 0.6
+  detection_every: 5
+  fov_y_degrees: 40  # a guess for phone and stock footage
+  track_frames: 300
+  resolution: 512
+  window_frames: 120
+  window_overlap: 20
+  iterations: [400, 400, 300]
+  check_every: 25
+  tolerance: 0.002
+  learning_rate: 0.01
+  chunk_frames: 24
+  surface_samples: 30000
+  keypoint_weight: 1.0
+  hand_weight: 0.5
+  silhouette_weight: 1.0
+  occluded_keypoint_weight: 0.25
+  smoothness_weight: 10.0
+  pose_prior_weight: 0.002
+  normal_weight: 0.1
+  depth_weight: 0.5
+  keypoint_depth_weight: 1.0
+  pose_fingers: true
+  finger_prior_weight: 0.02
+  joint_limit_weight: 10.0
+  knee_weight: 1.0
+  contact_weight: 100.0
+  self_contact_weight: 10.0
+  contact_slack: 0.3
+  expression_smoothing: 3
+
+faces:
+  iterations: [200, 600]
+  learning_rate: 0.01
+  prior_weight: 0.002
+  smoothing: 3
+  frontal_yaw: 0.35
+  correspondence_cap: 0.03
+  crop_margin: 1.1
+  crop_tile: 192
+  crop_quality: 88

@@ -30,6 +30,12 @@ export class Rig {
 	private readonly headStart: number;
 	private readonly expressionBasis: Float32Array;
 	private readonly posed: Float32Array;
+	/** The rest vertices with the current expressions, reused between poses. */
+	private readonly shaped: Float32Array;
+	/** `(J * 12)` the skinning matrices' top three rows, reused between poses. */
+	private readonly matrices: Float64Array;
+	/** `(J)` each bone's world transform in the last pose, root offset included. */
+	boneWorld: Mat4[];
 
 	constructor(file: AvatarFile) {
 		this.boneNames = file.metadata.bones;
@@ -54,6 +60,28 @@ export class Rig {
 			return parent < 0 ? pose : multiply4(this.inverseBindPoses[parent], pose);
 		});
 		this.posed = new Float32Array(this.rest.length);
+		this.shaped = Float32Array.from(this.rest);
+		this.matrices = new Float64Array(12 * this.boneNames.length);
+		this.boneWorld = this.bindPoses.map((pose) => Float64Array.from(pose));
+	}
+
+	/** `(4, 4)` row-major: bone `j`'s frame in the bind pose. */
+	bindPose(j: number): Mat4 {
+		return Float64Array.from(this.bindPoses[j]);
+	}
+
+	/** How far the root must rise from its bind position for the rest pose to stand on z = 0. */
+	standingHeight(): number {
+		let lowest = Infinity;
+		for (let v = 2; v < this.rest.length; v += 3) lowest = Math.min(lowest, this.rest[v]);
+		return -lowest;
+	}
+
+	/** Index of the bone called `name`. */
+	bone(name: string): number {
+		const index = this.boneNames.indexOf(name);
+		if (index < 0) throw new Error(`no bone ${name}`);
+		return index;
 	}
 
 	/**
@@ -81,8 +109,11 @@ export class Rig {
 		});
 	}
 
-	/** `(J)` skinning matrices for bind-relative rotations: world transform times inverse bind pose. */
-	skinning(rotations: Float64Array[]): Mat4[] {
+	/**
+	 * `(J)` bones' world transforms for bind-relative rotations, the root moved by `rootOffset`
+	 * from its bind position (in world axes), as `export/runtime.py`'s `forward_kinematics`.
+	 */
+	world(rotations: Float64Array[], rootOffset: Vec3 = [0, 0, 0]): Mat4[] {
 		const world: Mat4[] = [];
 		for (let j = 0; j < this.boneNames.length; j++) {
 			const local = identity4();
@@ -91,29 +122,50 @@ export class Rig {
 			}
 			const parent = this.parents[j];
 			const base = parent < 0 ? this.relative[j] : multiply4(world[parent], this.relative[j]);
-			world.push(multiply4(base, local));
+			const transform = multiply4(base, local);
+			if (parent < 0) for (let i = 0; i < 3; i++) transform[4 * i + 3] += rootOffset[i];
+			world.push(transform);
 		}
+		return world;
+	}
+
+	/** `(J)` skinning matrices: world transform times inverse bind pose. */
+	skinning(world: Mat4[]): Mat4[] {
 		return world.map((w, j) => multiply4(w, this.inverseBindPoses[j]));
 	}
 
-	/** `(V * 3)` posed vertices; the returned array is reused by the next call. */
-	pose(rotations: Float64Array[], expressions: Float32Array): Float32Array {
-		const skinning = this.skinning(rotations);
-		const rest = this.rest;
-		const basis = this.expressionBasis;
-		const headValues = rest.length - 3 * this.headStart;
-		const out = this.posed;
-		const k = this.influences;
+	/**
+	 * `(V * 3)` posed vertices for bind-relative rotations, expression weights and the root's
+	 * offset; the returned array is reused by the next call. Also sets `boneWorld`.
+	 */
+	pose(
+		rotations: Float64Array[],
+		expressions: Float32Array,
+		rootOffset: Vec3 = [0, 0, 0]
+	): Float32Array {
+		this.boneWorld = this.world(rotations, rootOffset);
+		// The top three rows of every skinning matrix, side by side, for the loop below.
+		const matrices = this.matrices;
+		this.skinning(this.boneWorld).forEach((m, j) => matrices.set(m.subarray(0, 12), 12 * j));
 
-		const shaped = Float32Array.from(rest);
+		// Only the head's vertices change with expressions: start them from the rest pose and add
+		// each expression that shows (weights below a thousandth move nothing visibly).
+		const shaped = this.shaped;
+		const head = 3 * this.headStart;
+		const headValues = shaped.length - head;
+		shaped.set(this.rest.subarray(head), head);
+		const basis = this.expressionBasis;
 		for (let e = 0; e < expressions.length; e++) {
 			const weight = expressions[e];
-			if (weight === 0) continue;
+			if (Math.abs(weight) < 1e-3) continue;
 			const offset = e * headValues;
-			const head = 3 * this.headStart;
 			for (let i = 0; i < headValues; i++) shaped[head + i] += weight * basis[offset + i];
 		}
 
+		const out = this.posed;
+		const k = this.influences;
+		const indices = this.boneIndices;
+		const weights = this.boneWeights;
 		for (let v = 0; v < this.vertexCount; v++) {
 			const x = shaped[3 * v];
 			const y = shaped[3 * v + 1];
@@ -121,13 +173,15 @@ export class Rig {
 			let px = 0;
 			let py = 0;
 			let pz = 0;
-			for (let i = 0; i < k; i++) {
-				const w = this.boneWeights[k * v + i];
+			for (let i = k * v; i < k * v + k; i++) {
+				const w = weights[i];
 				if (w === 0) continue;
-				const m = skinning[this.boneIndices[k * v + i]];
-				px += w * (m[0] * x + m[1] * y + m[2] * z + m[3]);
-				py += w * (m[4] * x + m[5] * y + m[6] * z + m[7]);
-				pz += w * (m[8] * x + m[9] * y + m[10] * z + m[11]);
+				const m = 12 * indices[i];
+				px += w * (matrices[m] * x + matrices[m + 1] * y + matrices[m + 2] * z + matrices[m + 3]);
+				py +=
+					w * (matrices[m + 4] * x + matrices[m + 5] * y + matrices[m + 6] * z + matrices[m + 7]);
+				pz +=
+					w * (matrices[m + 8] * x + matrices[m + 9] * y + matrices[m + 10] * z + matrices[m + 11]);
 			}
 			out[3 * v] = px;
 			out[3 * v + 1] = py;
