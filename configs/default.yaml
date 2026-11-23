@@ -154,3 +154,7 @@ faces:
   crop_margin: 1.1
   crop_tile: 192
   crop_quality: 88
+
+web:
+  expressions: [eyeBlink_L, eyeBlink_R, eyeLookUp_L, eyeLookUp_R, eyeLookDown_L, eyeLookDown_R, mouthSmile_L, mouthSmile_R]
+  texture_quality: 90

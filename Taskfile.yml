@@ -64,6 +64,11 @@ tasks:
     cmds:
       - uv run avatar-splats --config {{.CONFIG}} export
 
+  web:
+    desc: "Write a small avatar file for a web page: task web -- water"
+    cmds:
+      - uv run avatar-splats --config {{.CONFIG}} web {{.CLI_ARGS}}
+
   faces:
     desc: "Convert a video's face landmarks to the avatar's face (default head_expressions: task faces -- body)"
     cmds:

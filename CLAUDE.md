@@ -148,6 +148,7 @@ go-task fit          # ~3 min
 go-task train        # ~5 min for 20k steps
 go-task export
 go-task motion -- video.mp4  # motion clip from a video of one or more people
+go-task motion -- video.mp4 --keypoints-only  # faster: boxes and keypoints, no masks
 go-task viewer       # http://localhost:5173
 ```
 

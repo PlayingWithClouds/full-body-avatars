@@ -116,7 +116,9 @@ task notebook                # JupyterLab on notebooks/, one notebook per stage
 
 Or one stage at a time: `task preprocess`, `task fit`, `task train`, `task export`. Motion from
 any video: `task motion -- path/to/video.mp4` (results in `outputs/motion/<video name>/`,
-inspected in `notebooks/06_motion.ipynb`). A head video's face becomes the avatar's face (ICT expression weights, head and eye rotation per
+inspected in `notebooks/06_motion.ipynb`). `--keypoints-only` skips the masks: people are
+followed by their detected boxes and the body is fitted to keypoints alone, faster and fit for
+long videos, though without silhouettes (`notebooks/16_keypoint_motion.ipynb`). A head video's face becomes the avatar's face (ICT expression weights, head and eye rotation per
 frame): `task faces` (default `head_expressions`, or `task faces -- head_static`), written to
 `outputs/faces/<video>.{npz,faces.json,faces.jpg}`. MediaPipe's ARKit blendshapes, calibrated to
 her neutral frontal frames, give the expressions; all 468 mesh landmarks refine them, with a prior

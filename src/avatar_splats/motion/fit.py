@@ -16,6 +16,10 @@ smooth motion, a small pose prior, joint limits, knees that bend only backwards,
 do not pass through themselves or each other. A person's silhouette is compared only
 where no one else's mask is, since whoever is in front hides them there.
 
+Observations without masks (``observe_keypoints``) are fitted to the keypoints and hands
+alone: the silhouette phase is skipped, and a keypoint lying on someone else is not told from
+one of the person's own.
+
 Long videos are fitted in overlapping windows of frames, each started from where the one before
 left off and blended into it across the overlap, so memory and time grow with the length and the
 motion stays continuous. Keypoints, hand points and joints are linear in the bones' skinning
@@ -118,7 +122,7 @@ class MotionFit(ArrayRecord):
     """``(P, N)`` mean distance in pixels from the fitted to the detected keypoints."""
     silhouette_iou: np.ndarray
     """``(P, N)`` IoU of the fitted silhouette with the mask, outside other people's masks and
-    the ignored pixels."""
+    the ignored pixels; NaN where the observations have no masks."""
 
     def camera(self) -> Camera:
         width, height = self.image_size
@@ -306,26 +310,29 @@ class _Fitter:
         return in_camera @ camera.view[:3, :3].to(pixels)  # camera to world axes
 
     def targets(self, frames: slice) -> dict[str, torch.Tensor]:
-        """The window's keypoints, hand points and masks, at the fitting size."""
+        """The window's keypoints, hand points and masks (where observed), at the fitting
+        size."""
         observations, config = self.observations, self.config
         keypoints = self.tensor(np.nan_to_num(observations.keypoints[:, frames]))
-        masks = torch.from_numpy(observations.mask_frames(frames)).to(self.device)
         confidence = keypoints[..., 2] * (keypoints[..., 2] >= MIN_KEYPOINT_CONFIDENCE)
-        if not self.independent:
-            confidence = confidence * _occlusion_weights(
-                keypoints[..., :2] * self.scale, masks, config.occluded_keypoint_weight
-            )
         hands = self.tensor(np.nan_to_num(observations.hands[:, frames]))
-        ignored = torch.from_numpy(observations.ignored_frames(frames)).to(self.device)
-        compared = (~ignored).float() if self.independent else _unoccluded(masks.float()) * ~ignored
         targets = {
             "keypoints": keypoints[..., :2] * self.scale,
             "confidence": confidence,
             "hands": hands[..., :2] * self.scale,
             "hand_confidence": hands[..., 2] * (hands[..., 2] >= MIN_HAND_CONFIDENCE),
-            "masks": masks.float(),
-            "compared": compared,
         }
+        if observations.masks is None:
+            return targets
+        masks = torch.from_numpy(observations.mask_frames(frames)).to(self.device)
+        if not self.independent:
+            targets["confidence"] = confidence * _occlusion_weights(
+                keypoints[..., :2] * self.scale, masks, config.occluded_keypoint_weight
+            )
+        ignored = torch.from_numpy(observations.ignored_frames(frames)).to(self.device)
+        compared = (~ignored).float() if self.independent else _unoccluded(masks.float()) * ~ignored
+        targets["masks"] = masks.float()
+        targets["compared"] = compared
         if self.extra_weights is not None:
             extra = self.tensor(np.nan_to_num(observations.extra_keypoints[:, frames]))
             targets["extra"] = extra[..., :2] * self.scale
@@ -468,6 +475,9 @@ class _Fitter:
         ]
         steps, last = [], {}
         for phase, max_steps in enumerate(config.iterations):
+            if phase >= 2 and "masks" not in targets:
+                steps.append(0)  # no silhouettes to fit
+                continue
             optimizer = torch.optim.Adam(params.parameters(), lr=config.learning_rate)
             previous = None
             step = 0
@@ -518,7 +528,8 @@ class _Fitter:
     def evaluate(
         self, rotations: torch.Tensor, translation: torch.Tensor, targets: dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(P, n)`` keypoint errors in pixels and silhouette IoUs of fitted frames."""
+        """``(P, n)`` keypoint errors in pixels and silhouette IoUs of fitted frames; the IoUs
+        are NaN without masks."""
         skinning = self.body.skinning(
             self.rest_bones, rotations.flatten(0, 1), translation.flatten(0, 1)
         ).unflatten(0, rotations.shape[:2])
@@ -526,6 +537,8 @@ class _Fitter:
         distance = (projected - targets["keypoints"]).norm(dim=-1) / self.scale
         seen = targets["confidence"] > 0
         errors = (distance * seen).sum(-1) / seen.sum(-1).clamp_min(1)
+        if "masks" not in targets:
+            return errors, torch.full_like(errors, torch.nan)
         ious = []
         for start in range(0, rotations.shape[1], self.config.chunk_frames):
             chunk = slice(start, start + self.config.chunk_frames)

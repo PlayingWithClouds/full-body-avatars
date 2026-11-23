@@ -25,6 +25,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.add_parser("fit", help="fit the body and head models and build the avatar's mesh")
     commands.add_parser("train", help="train the avatar's Gaussians")
     commands.add_parser("export", help="write the avatar file for the game runtime")
+    web_parser = commands.add_parser(
+        "web", help="write a small avatar file for a web page: the mesh, without the genitals"
+    )
+    web_parser.add_argument("name", help="the exported avatar, outputs/export/<name>.avatar")
     faces_parser = commands.add_parser(
         "faces", help="convert a video's face landmarks to the avatar's face, per frame"
     )
@@ -41,6 +45,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     motion_parser.add_argument("--name", help="name of the results (default: the video's)")
     motion_parser.add_argument(
         "--refit", action="store_true", help="fit again from the observations of an earlier run"
+    )
+    motion_parser.add_argument(
+        "--keypoints-only",
+        action="store_true",
+        help="no masks: follow people by their boxes and fit to keypoints alone (faster)",
     )
 
     args = parser.parse_args(argv)
@@ -66,6 +75,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from avatar_splats.export import export_capture
 
         return report({"avatar": export_capture(config)})
+    if args.command == "web":
+        from avatar_splats.export.web import export_web
+
+        return report(export_web(config, args.name))
     if args.command == "faces":
         from avatar_splats.faces import convert_video
 
@@ -76,7 +89,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "motion":
         from avatar_splats.motion import extract_motion
 
-        return report(extract_motion(config, args.video, args.name or args.video.stem, args.refit))
+        name = args.name or args.video.stem
+        return report(extract_motion(config, args.video, name, args.refit, args.keypoints_only))
     raise AssertionError(f"unhandled command {args.command}")
 
 

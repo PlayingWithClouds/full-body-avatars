@@ -307,6 +307,17 @@ class FacesConfig:
     """JPEG quality of the atlas."""
 
 
+@dataclass(frozen=True)
+class WebConfig:
+    """The small avatar file a web page shows (``export.web``)."""
+
+    expressions: list[str]
+    """The blendshapes the page animates; the others are dropped, as they are most of the
+    file."""
+    texture_quality: int
+    """WebP quality of the textures."""
+
+
 MEASUREMENT_NAMES = ("weight", "bust", "underbust", "waist", "hips", "foot")
 """What ``PerformerConfig.measurements`` may give (``body_models.measurements``)."""
 
@@ -341,6 +352,7 @@ class Config:
     training: TrainingConfig
     motion: MotionConfig
     faces: FacesConfig
+    web: WebConfig
 
 
 def load_config(path: str | Path) -> Config:

@@ -12,18 +12,22 @@ from avatar_splats.fitting.body import BodyFit
 from avatar_splats.fitting.pipeline import fitted_path
 from avatar_splats.motion.clip import motion_clip, write_motion
 from avatar_splats.motion.fit import fit_motion
-from avatar_splats.motion.observe import Observations, observe_people
+from avatar_splats.motion.observe import Observations, observe_keypoints, observe_people
 
 RESULTS = ("observations", "fit", "clip")
 """What the stage writes per video, in order."""
 
 
-def extract_motion(config: Config, video: Path, name: str, refit: bool = False) -> dict[str, Path]:
+def extract_motion(
+    config: Config, video: Path, name: str, refit: bool = False, keypoints_only: bool = False
+) -> dict[str, Path]:
     """Extract the motion of everyone in ``video`` as a clip for the avatar.
 
     Args:
         name: names the results, under ``outputs/motion/<name>/``.
         refit: start from the observations of an earlier run instead of the video.
+        keypoints_only: observe without masks (``observe_keypoints``) and fit to the keypoints
+            alone: faster, but no silhouettes and no telling who hides whom.
 
     Returns:
         Where each result was written.
@@ -32,7 +36,8 @@ def extract_motion(config: Config, video: Path, name: str, refit: bool = False) 
     if refit:
         observations = Observations.load(written["observations"])
     else:
-        observations = observe_people(video, config.motion, config.preprocess)
+        observe = observe_keypoints if keypoints_only else observe_people
+        observations = observe(video, config.motion, config.preprocess)
         observations.save(written["observations"])
 
     body = AnnyBody().to(config.motion.device)
